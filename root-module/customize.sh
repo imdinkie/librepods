@@ -37,8 +37,8 @@ set_perm "$XZ" 0 0 755
 
 # The bundled radare2 is a custom build that works without Termux: https://github.com/devnoname120/radare2/releases/tag/5.9.8-android-aln
 ui_print "Extracting radare2 to /data/local/tmp/aln_unzip..."
-$BUSYBOX tar xf "$UNZIP_DIR/radare2-5.9.9-android-aarch64-aln.tar.gz" -C / || {
-    abort "Failed to extract "$UNZIP_DIR/radare2-5.9.9-android-aarch64-aln.tar.gz"."
+$BUSYBOX tar xf "$UNZIP_DIR/radare2-5.9.9-android-aarch64.tar.gz" -C / || {
+    abort "Failed to extract "$UNZIP_DIR/radare2-5.9.9-android-aarch64.tar.gz"."
 }
 
 
@@ -83,20 +83,47 @@ else
     abort "xz shim not found."
 fi
 
+ui_print "Searching for Bluetooth library to patch..."
+
+# Known locations across Android versions / devices.
 for lib_path in \
     "/apex/com.android.btservices/lib64/libbluetooth_jni.so" \
+    "/apex/com.android.bluetooth/lib64/libbluetooth_jni.so" \
+    "/system/apex/com.android.btservices/lib64/libbluetooth_jni.so" \
+    "/system/apex/com.android.bluetooth/lib64/libbluetooth_jni.so" \
     "/system/lib64/libbluetooth_jni.so" \
+    "/system_ext/lib64/libbluetooth_jni.so" \
+    "/product/lib64/libbluetooth_jni.so" \
+    "/vendor/lib64/libbluetooth_jni.so" \
     "/system/lib64/libbluetooth_qti.so" \
-    "/system_ext/lib64/libbluetooth_qti.so"; do
+    "/system_ext/lib64/libbluetooth_qti.so" \
+    "/vendor/lib64/libbluetooth_qti.so"; do
     if [ -f "$lib_path" ]; then
         ui_print "Detected library: $lib_path"
         [ -z "$SOURCE_FILE" ] && SOURCE_FILE="$lib_path"
         [ -z "$LIBRARY_NAME" ] && LIBRARY_NAME="$(basename "$lib_path")"
+        break
     fi
 done
 
+# Fallback: search APEX directories if the hardcoded list missed it (Android variants can move it).
+if [ -z "$SOURCE_FILE" ]; then
+    for apex_root in /apex /system/apex; do
+        [ -d "$apex_root" ] || continue
+        # Prefer libbluetooth_jni.so if present.
+        found="$($BUSYBOX find "$apex_root" -maxdepth 3 -type f -name 'libbluetooth_jni.so' 2>/dev/null | $BUSYBOX head -n 1)"
+        if [ -n "$found" ] && [ -f "$found" ]; then
+            ui_print "Detected library via search: $found"
+            SOURCE_FILE="$found"
+            LIBRARY_NAME="$(basename "$found")"
+            break
+        fi
+    done
+fi
+
 [ -z "$SOURCE_FILE" ] && {
     ui_print "Error: No target library found."
+    ui_print "Checked known paths and searched /apex + /system/apex for libbluetooth_jni.so."
     abort "No target library found."
 }
 
