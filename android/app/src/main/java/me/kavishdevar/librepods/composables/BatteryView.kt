@@ -39,7 +39,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -89,18 +89,30 @@ fun BatteryView(service: AirPodsService, preview: Boolean = false) {
     }
     val context = LocalContext.current
 
-    LaunchedEffect(context) {
-        val batteryIntentFilter = IntentFilter()
-            .apply {
+    DisposableEffect(context, preview) {
+        if (preview) {
+            onDispose {}
+        } else {
+            val batteryIntentFilter = IntentFilter().apply {
                 addAction(AirPodsNotifications.BATTERY_DATA)
                 addAction(AirPodsNotifications.DISCONNECT_RECEIVERS)
             }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(
-                batteryReceiver,
-                batteryIntentFilter,
-                Context.RECEIVER_EXPORTED
-            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(
+                    batteryReceiver,
+                    batteryIntentFilter,
+                    Context.RECEIVER_EXPORTED
+                )
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                context.registerReceiver(batteryReceiver, batteryIntentFilter)
+            }
+            onDispose {
+                try {
+                    context.unregisterReceiver(batteryReceiver)
+                } catch (_: Exception) {
+                }
+            }
         }
     }
 

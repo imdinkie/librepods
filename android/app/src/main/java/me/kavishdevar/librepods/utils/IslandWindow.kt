@@ -36,6 +36,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.util.Log.e
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -79,6 +80,7 @@ class IslandWindow(private val context: Context) {
     private val islandView: View = LayoutInflater.from(context).inflate(R.layout.island_window, null)
     private var isClosing = false
     private var params: WindowManager.LayoutParams? = null
+    private var batteryReceiverRegistered = false
 
     private var initialY = 0f
     private var initialTouchY = 0f
@@ -116,12 +118,20 @@ class IslandWindow(private val context: Context) {
                 }
                 updateBatteryDisplay(batteryList)
             } else if (intent?.action == AirPodsNotifications.DISCONNECT_RECEIVERS) {
-                try {
-                    context?.unregisterReceiver(this)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                unregisterBatteryReceiverSafely("DISCONNECT_RECEIVERS")
             }
+        }
+    }
+
+    private fun unregisterBatteryReceiverSafely(reason: String) {
+        if (!batteryReceiverRegistered) return
+        try {
+            context.unregisterReceiver(batteryReceiver)
+            Log.d("IslandWindow", "RCV - batteryReceiver ($reason)")
+        } catch (e: Exception) {
+            Log.w("IslandWindow", "RCV - batteryReceiver failed ($reason): ${e.message}")
+        } finally {
+            batteryReceiverRegistered = false
         }
     }
 
@@ -164,7 +174,7 @@ class IslandWindow(private val context: Context) {
     @SuppressLint("SetTextI18s", "ClickableViewAccessibility", "UnspecifiedRegisterReceiverFlag",
         "SetTextI18n"
     )
-    fun show(name: String, batteryPercentage: Int, context: Context, type: IslandType = IslandType.CONNECTED, reversed: Boolean = false, otherDeviceName: String? = null) {
+    fun show(name: String, batteryPercentage: Int, type: IslandType = IslandType.CONNECTED, reversed: Boolean = false, otherDeviceName: String? = null) {
         if (ServiceManager.getService()?.islandOpen == true) return
         else ServiceManager.getService()?.islandOpen = true
 
@@ -227,10 +237,18 @@ class IslandWindow(private val context: Context) {
 
         val batteryIntentFilter = IntentFilter(AirPodsNotifications.BATTERY_DATA)
         batteryIntentFilter.addAction(AirPodsNotifications.DISCONNECT_RECEIVERS)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(batteryReceiver, batteryIntentFilter, Context.RECEIVER_EXPORTED)
-        } else {
-            context.registerReceiver(batteryReceiver, batteryIntentFilter)
+        if (!batteryReceiverRegistered) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(
+                    batteryReceiver,
+                    batteryIntentFilter,
+                    Context.RECEIVER_EXPORTED
+                )
+            } else {
+                context.registerReceiver(batteryReceiver, batteryIntentFilter)
+            }
+            batteryReceiverRegistered = true
+            Log.d("IslandWindow", "RCV + batteryReceiver")
         }
 
         ServiceManager.getService()?.sendBatteryBroadcast()
@@ -646,15 +664,11 @@ class IslandWindow(private val context: Context) {
             Handler(Looper.getMainLooper()).post { close() }
             return
         }
-        try {
-            if (isClosing) return
-            isClosing = true
-
             try {
-                context.unregisterReceiver(batteryReceiver)
-            } catch (e: Exception) {
-//                e.printStackTrace()
-            }
+                if (isClosing) return
+                isClosing = true
+
+            unregisterBatteryReceiverSafely("close")
 
             ServiceManager.getService()?.islandOpen = false
             autoCloseHandler?.removeCallbacks(autoCloseRunnable ?: return)
@@ -716,15 +730,11 @@ class IslandWindow(private val context: Context) {
             Handler(Looper.getMainLooper()).post { forceClose() }
             return
         }
-        try {
-            if (isClosing) return
-            isClosing = true
-
             try {
-                context.unregisterReceiver(batteryReceiver)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+                if (isClosing) return
+                isClosing = true
+
+            unregisterBatteryReceiverSafely("forceClose")
 
             ServiceManager.getService()?.islandOpen = false
             autoCloseHandler?.removeCallbacks(autoCloseRunnable ?: return)
