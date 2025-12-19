@@ -34,8 +34,11 @@ import kotlinx.coroutines.launch
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicReference
 
 enum class ATTHandles(val value: Int) {
     TRANSPARENCY(0x18),
@@ -56,6 +59,8 @@ class ATTManager(private val device: BluetoothDevice) {
         private const val OPCODE_READ_REQUEST: Byte = 0x0A
         private const val OPCODE_WRITE_REQUEST: Byte = 0x12
         private const val OPCODE_HANDLE_VALUE_NTF: Byte = 0x1B
+
+        private const val CONNECT_TIMEOUT_MS = 5000L
     }
 
     var socket: BluetoothSocket? = null
@@ -67,16 +72,62 @@ class ATTManager(private val device: BluetoothDevice) {
     // queue for non-notification PDUs (responses to requests)
     private val responses = LinkedBlockingQueue<ByteArray>()
 
+    private fun connectSocketWithTimeout(socket: BluetoothSocket, timeoutMs: Long): Result<Unit> {
+        val error = AtomicReference<Exception?>(null)
+        val latch = CountDownLatch(1)
+
+        val connectThread = Thread(
+            {
+                try {
+                    socket.connect()
+                } catch (e: Exception) {
+                    error.set(e)
+                } finally {
+                    latch.countDown()
+                }
+            },
+            "LibrePods-ATT-Connect"
+        ).apply { isDaemon = true }
+
+        connectThread.start()
+
+        val completed = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        if (!completed) {
+            try {
+                socket.close()
+            } catch (_: Exception) {
+            }
+            latch.await(250, TimeUnit.MILLISECONDS)
+            return Result.failure(TimeoutException("ATT BluetoothSocket.connect() timed out after ${timeoutMs}ms"))
+        }
+
+        val exception = error.get()
+        return if (exception != null) Result.failure(exception) else Result.success(Unit)
+    }
+
     @SuppressLint("MissingPermission")
     fun connect() {
         HiddenApiBypass.addHiddenApiExemptions("Landroid/bluetooth/BluetoothSocket;")
         val uuid = ParcelUuid.fromString("00000000-0000-0000-0000-000000000000")
 
-        socket = createBluetoothSocket(device, uuid)
-        socket!!.connect()
-        input = socket!!.inputStream
-        output = socket!!.outputStream
-        Log.d(TAG, "Connected to ATT")
+        val candidateSocket = createBluetoothSocket(device, uuid)
+        Log.d(TAG, "ATT socket.connect: timeoutMs=$CONNECT_TIMEOUT_MS device=${device.address}")
+        val connectResult = connectSocketWithTimeout(candidateSocket, CONNECT_TIMEOUT_MS)
+        if (connectResult.isFailure || !candidateSocket.isConnected) {
+            val exception = connectResult.exceptionOrNull()
+            val message = exception?.localizedMessage ?: "unknown error"
+            Log.w(TAG, "ATT socket.connect failed: $message")
+            try {
+                candidateSocket.close()
+            } catch (_: Exception) {
+            }
+            throw exception ?: IllegalStateException("ATT socket connect failed: $message")
+        }
+
+        socket = candidateSocket
+        input = candidateSocket.inputStream
+        output = candidateSocket.outputStream
+        Log.d(TAG, "Connected to ATT: device=${device.address}")
 
         notificationJob = CoroutineScope(Dispatchers.IO).launch {
             while (socket?.isConnected == true) {
