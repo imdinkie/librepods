@@ -26,6 +26,7 @@ package me.kavishdevar.librepods.utils
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
+import android.os.SystemClock
 import android.os.ParcelUuid
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -56,11 +57,16 @@ class ATTManager(private val device: BluetoothDevice) {
     companion object {
         private const val TAG = "ATTManager"
 
+        private const val OPCODE_ERROR_RESPONSE: Byte = 0x01
+        private const val OPCODE_READ_RESPONSE: Byte = 0x0B
+        private const val OPCODE_WRITE_RESPONSE: Byte = 0x13
+
         private const val OPCODE_READ_REQUEST: Byte = 0x0A
         private const val OPCODE_WRITE_REQUEST: Byte = 0x12
         private const val OPCODE_HANDLE_VALUE_NTF: Byte = 0x1B
 
         private const val CONNECT_TIMEOUT_MS = 5000L
+        private const val RESPONSE_TIMEOUT_MS = 5000L
     }
 
     var socket: BluetoothSocket? = null
@@ -71,6 +77,7 @@ class ATTManager(private val device: BluetoothDevice) {
 
     // queue for non-notification PDUs (responses to requests)
     private val responses = LinkedBlockingQueue<ByteArray>()
+    private val requestLock = Any()
 
     private fun connectSocketWithTimeout(socket: BluetoothSocket, timeoutMs: Long): Result<Unit> {
         val error = AtomicReference<Exception?>(null)
@@ -103,6 +110,49 @@ class ATTManager(private val device: BluetoothDevice) {
 
         val exception = error.get()
         return if (exception != null) Result.failure(exception) else Result.success(Unit)
+    }
+
+    private fun waitForResponse(expectedOpcode: Byte, timeoutMs: Long = RESPONSE_TIMEOUT_MS): ByteArray {
+        val deadlineMs = SystemClock.elapsedRealtime() + timeoutMs
+        while (true) {
+            val remainingMs = deadlineMs - SystemClock.elapsedRealtime()
+            if (remainingMs <= 0) {
+                throw IllegalStateException(
+                    "No ATT response within ${timeoutMs}ms (expected=${String.format("%02X", expectedOpcode.toInt() and 0xFF)})"
+                )
+            }
+
+            val resp = try {
+                responses.poll(remainingMs, TimeUnit.MILLISECONDS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IllegalStateException("Interrupted while waiting for ATT response", e)
+            } ?: continue
+
+            if (resp.isEmpty()) continue
+
+            val opcode = resp[0]
+            if (opcode == expectedOpcode || opcode == OPCODE_ERROR_RESPONSE) {
+                Log.d(
+                    TAG,
+                    "waitForResponse: opcode=${String.format("%02X", opcode.toInt() and 0xFF)} len=${resp.size}"
+                )
+                return resp
+            }
+
+            Log.d(
+                TAG,
+                "waitForResponse: ignoring opcode=${String.format("%02X", opcode.toInt() and 0xFF)} len=${resp.size} while waiting for ${String.format("%02X", expectedOpcode.toInt() and 0xFF)}"
+            )
+        }
+    }
+
+    private fun formatErrorResponse(pdu: ByteArray): String {
+        if (pdu.size < 5 || pdu[0] != OPCODE_ERROR_RESPONSE) return "invalid_error_pdu(len=${pdu.size})"
+        val requestOpcode = pdu[1]
+        val handle = (pdu[2].toInt() and 0xFF) or ((pdu[3].toInt() and 0xFF) shl 8)
+        val errorCode = pdu[4]
+        return "req=${String.format("%02X", requestOpcode.toInt() and 0xFF)} handle=0x${String.format("%04X", handle)} code=${String.format("%02X", errorCode.toInt() and 0xFF)}"
     }
 
     @SuppressLint("MissingPermission")
@@ -179,37 +229,50 @@ class ATTManager(private val device: BluetoothDevice) {
     }
 
     fun read(handle: ATTHandles): ByteArray {
-        val lsb = (handle.value and 0xFF).toByte()
-        val msb = ((handle.value shr 8) and 0xFF).toByte()
-        val pdu = byteArrayOf(OPCODE_READ_REQUEST, lsb, msb)
-        writeRaw(pdu)
-        // wait for response placed into responses queue by the reader coroutine
-        return readResponse()
+        synchronized(requestLock) {
+            val lsb = (handle.value and 0xFF).toByte()
+            val msb = ((handle.value shr 8) and 0xFF).toByte()
+            val pdu = byteArrayOf(OPCODE_READ_REQUEST, lsb, msb)
+            writeRaw(pdu)
+            val resp = waitForResponse(OPCODE_READ_RESPONSE)
+            if (resp[0] == OPCODE_ERROR_RESPONSE) {
+                throw IllegalStateException("ATT read error: ${formatErrorResponse(resp)}")
+            }
+            return resp.copyOfRange(1, resp.size)
+        }
     }
 
     fun write(handle: ATTHandles, value: ByteArray) {
-        val lsb = (handle.value and 0xFF).toByte()
-        val msb = ((handle.value shr 8) and 0xFF).toByte()
-        val pdu = byteArrayOf(OPCODE_WRITE_REQUEST, lsb, msb) + value
-        writeRaw(pdu)
-        // usually a Write Response (0x13) will arrive; wait for it (but discard return)
-        try {
-            readResponse()
-        } catch (e: Exception) {
-            Log.w(TAG, "No write response received: ${e.message}")
+        synchronized(requestLock) {
+            val lsb = (handle.value and 0xFF).toByte()
+            val msb = ((handle.value shr 8) and 0xFF).toByte()
+            val pdu = byteArrayOf(OPCODE_WRITE_REQUEST, lsb, msb) + value
+            writeRaw(pdu)
+            try {
+                val resp = waitForResponse(OPCODE_WRITE_RESPONSE)
+                if (resp[0] == OPCODE_ERROR_RESPONSE) {
+                    Log.w(TAG, "ATT write error: ${formatErrorResponse(resp)}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "No write response received: ${e.message}")
+            }
         }
     }
 
     fun write(handle: ATTCCCDHandles, value: ByteArray) {
-        val lsb = (handle.value and 0xFF).toByte()
-        val msb = ((handle.value shr 8) and 0xFF).toByte()
-        val pdu = byteArrayOf(OPCODE_WRITE_REQUEST, lsb, msb) + value
-        writeRaw(pdu)
-        // usually a Write Response (0x13) will arrive; wait for it (but discard return)
-        try {
-            readResponse()
-        } catch (e: Exception) {
-            Log.w(TAG, "No write response received: ${e.message}")
+        synchronized(requestLock) {
+            val lsb = (handle.value and 0xFF).toByte()
+            val msb = ((handle.value shr 8) and 0xFF).toByte()
+            val pdu = byteArrayOf(OPCODE_WRITE_REQUEST, lsb, msb) + value
+            writeRaw(pdu)
+            try {
+                val resp = waitForResponse(OPCODE_WRITE_RESPONSE)
+                if (resp[0] == OPCODE_ERROR_RESPONSE) {
+                    Log.w(TAG, "ATT write error: ${formatErrorResponse(resp)}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "No write response received: ${e.message}")
+            }
         }
     }
 
@@ -231,19 +294,6 @@ class ATTManager(private val device: BluetoothDevice) {
         val data = buffer.copyOfRange(0, len)
         Log.d(TAG, "readPDU: ${data.joinToString(" ") { String.format("%02X", it) }}")
         return data
-    }
-
-    // wait for a response PDU produced by the background reader
-    private fun readResponse(timeoutMs: Long = 2000): ByteArray {
-        try {
-            val resp = responses.poll(timeoutMs, TimeUnit.MILLISECONDS)
-                ?: throw IllegalStateException("No response read from ATT socket within $timeoutMs ms")
-            Log.d(TAG, "readResponse: ${resp.joinToString(" ") { String.format("%02X", it) }}")
-            return resp.copyOfRange(1, resp.size)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw IllegalStateException("Interrupted while waiting for ATT response", e)
-        }
     }
 
     private fun createBluetoothSocket(device: BluetoothDevice, uuid: ParcelUuid): BluetoothSocket {

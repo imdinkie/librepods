@@ -158,6 +158,10 @@ fun UpdateHearingTestScreen(@Suppress("unused") navController: NavController) {
                     override fun invoke(value: ByteArray) {
                         val parsed = parseHearingAidSettingsResponse(value)
                         if (parsed != null) {
+                            if (!initialReadSucceeded.value) {
+                                initialReadSucceeded.value = true
+                                Log.d(TAG, "Initial read marked successful from ATT notification")
+                            }
                             leftEQ.value = parsed.leftEQ.copyOf()
                             rightEQ.value = parsed.rightEQ.copyOf()
                             conversationBoostEnabled.value = parsed.leftConversationBoost

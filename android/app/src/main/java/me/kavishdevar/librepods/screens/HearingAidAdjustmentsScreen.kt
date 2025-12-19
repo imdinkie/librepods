@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -73,9 +74,27 @@ fun HearingAidAdjustmentsScreen(@Suppress("unused") navController: NavController
     isSystemInDarkTheme()
     val verticalScrollState = rememberScrollState()
     val hazeState = remember { HazeState() }
-    val attManager = ServiceManager.getService()?.attManager ?: throw IllegalStateException("ATTManager not available")
+    val service = ServiceManager.getService()
+    val attManager = service?.attManager
+    if (attManager == null) {
+        Log.w(TAG, "ATTManager not available, showing placeholder UI")
+        StyledScaffold(
+            title = stringResource(R.string.adjustments)
+        ) { spacerHeight ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.Center
+            ) {
+                Spacer(modifier = Modifier.height(spacerHeight))
+                Text(text = stringResource(R.string.airpods_not_connected))
+            }
+        }
+        return
+    }
 
-    val aacpManager = remember { ServiceManager.getService()?.aacpManager }
+    val aacpManager = remember { service.aacpManager }
     val backdrop = rememberLayerBackdrop()
     StyledScaffold(
         title = stringResource(R.string.adjustments)
@@ -149,6 +168,10 @@ fun HearingAidAdjustmentsScreen(@Suppress("unused") navController: NavController
                     override fun invoke(value: ByteArray) {
                         val parsed = parseHearingAidSettingsResponse(value)
                         if (parsed != null) {
+                            if (!initialReadSucceeded.value) {
+                                initialReadSucceeded.value = true
+                                Log.d(TAG, "Initial read marked successful from ATT notification")
+                            }
                             amplificationSliderValue.floatValue = parsed.netAmplification
                             balanceSliderValue.floatValue = parsed.balance
                             toneSliderValue.floatValue = parsed.leftTone

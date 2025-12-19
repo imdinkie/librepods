@@ -25,7 +25,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -144,6 +143,10 @@ fun sendHearingAidSettings(
     debounceJob.value = CoroutineScope(Dispatchers.IO).launch {
         delay(100)
         try {
+            if (attManager.socket?.isConnected != true) {
+                Log.w(TAG, "ATT socket not connected, skipping hearing aid write")
+                return@launch
+            }
             val currentData = attManager.read(ATTHandles.HEARING_AID)
             Log.d(TAG, "Current data before update: ${currentData.joinToString(" ") { String.format("%02X", it) }}")
             if (currentData.size < 104) {
@@ -183,8 +186,9 @@ fun sendHearingAidSettings(
             Log.d(TAG, "Sending updated settings: ${currentData.joinToString(" ") { String.format("%02X", it) }}")
 
             attManager.write(ATTHandles.HEARING_AID, currentData)
-        } catch (e: IOException) {
-            e.printStackTrace()
+            Log.d(TAG, "Hearing aid settings write completed (len=${currentData.size})")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send hearing aid settings: ${e.javaClass.simpleName}: ${e.localizedMessage}")
         }
     }
 }
