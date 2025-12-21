@@ -1380,10 +1380,15 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 bleManager.getMostRecentStatus()?.let { it.isLeftInEar == true || it.isRightInEar == true }
             val aacpAnyInEar = earDetectionNotification.status.any { it == 0x00.toByte() }
 
-            val confirmedOutOfEar = (bleAnyInEar != true) && !aacpAnyInEar
+            // Prefer AACP ear detection for confirming out-of-ear; BLE can lag/stale and otherwise
+            // blocks "disconnect when not wearing".
+            val confirmedOutOfEar = !aacpAnyInEar
             if (!confirmedOutOfEar) {
                 Log.d(TAG, "Ear actions: out-of-ear no longer confirmed; skipping (bleAnyInEar=$bleAnyInEar aacpAnyInEar=$aacpAnyInEar reason=$reason)")
                 return@Runnable
+            }
+            if (bleAnyInEar == true) {
+                Log.d(TAG, "Ear actions: BLE/AACP mismatch (bleAnyInEar=true aacpAnyInEar=false reason=$reason); proceeding")
             }
 
             MediaController.sendPause(force = true)
