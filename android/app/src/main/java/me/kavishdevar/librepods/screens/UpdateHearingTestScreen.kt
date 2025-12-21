@@ -40,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -81,10 +82,31 @@ private const val TAG = "HearingAidAdjustments"
 @Composable
 fun UpdateHearingTestScreen(@Suppress("unused") navController: NavController) {
     val verticalScrollState = rememberScrollState()
-    val attManager = ServiceManager.getService()?.attManager
+    val service = ServiceManager.serviceFlow.collectAsState(initial = ServiceManager.getService()).value
+    if (service == null) {
+        Text(
+            text = stringResource(R.string.airpods_not_connected),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            textAlign = TextAlign.Center
+        )
+        return
+    }
+
+    val attManager = service.attManagerFlow.collectAsState(initial = service.attManager).value
+    LaunchedEffect(attManager, service.isConnectedLocally) {
+        if (attManager == null && service.isConnectedLocally) {
+            service.ensureAttConnected("update_hearing_test_screen")
+        }
+    }
     if (attManager == null) {
         Text(
-            text = stringResource(R.string.att_manager_is_null_try_reconnecting),
+            text = if (service.isConnectedLocally) {
+                stringResource(R.string.att_manager_is_null_try_reconnecting)
+            } else {
+                stringResource(R.string.airpods_not_connected)
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(16.dp),

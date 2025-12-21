@@ -72,7 +72,7 @@ import me.kavishdevar.librepods.utils.parseTransparencySettingsResponse
 import me.kavishdevar.librepods.utils.sendTransparencySettings
 import kotlin.io.encoding.ExperimentalEncodingApi
 
-private const val TAG = "AccessibilitySettings"
+private const val TAG = "HearingAidScreen"
 
 @SuppressLint("DefaultLocale")
 @ExperimentalHazeMaterialsApi
@@ -83,7 +83,7 @@ fun HearingAidScreen(navController: NavController) {
     val textColor = if (isDarkTheme) Color.White else Color.Black
     val verticalScrollState  = rememberScrollState()
     val snackbarHostState = remember { SnackbarHostState() }
-    val attManager = ServiceManager.getService()?.attManager ?: return
+    val attManager = ServiceManager.getService()?.attManager
 
     val aacpManager = remember { ServiceManager.getService()?.aacpManager }
 
@@ -93,8 +93,7 @@ fun HearingAidScreen(navController: NavController) {
 
     val hearingAidEnabled = remember {
         val aidStatus = aacpManager?.controlCommandStatusList?.find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID }
-        val assistStatus = aacpManager?.controlCommandStatusList?.find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG }
-        mutableStateOf((aidStatus?.value?.getOrNull(1) == 0x01.toByte()) && (assistStatus?.value?.getOrNull(0) == 0x01.toByte()))
+        mutableStateOf(aidStatus?.value?.getOrNull(1) == 0x01.toByte())
     }
 
     val hazeStateS = remember { mutableStateOf(HazeState()) } // dont question this. i could possibly use something other than initializing it with an empty state and then replacing it with the the one provided by the scaffold
@@ -122,7 +121,15 @@ fun HearingAidScreen(navController: NavController) {
                             controlCommand.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG.value) {
                             val aidStatus = aacpManager?.controlCommandStatusList?.find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID }
                             val assistStatus = aacpManager?.controlCommandStatusList?.find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG }
-                            hearingAidEnabled.value = (aidStatus?.value?.getOrNull(1) == 0x01.toByte()) && (assistStatus?.value?.getOrNull(0) == 0x01.toByte())
+                            val aidEnabled = aidStatus?.value?.getOrNull(1) == 0x01.toByte()
+                            hearingAidEnabled.value = aidEnabled
+
+                            val aidHex = aidStatus?.value?.joinToString(" ") { "%02X".format(it) } ?: "null"
+                            val assistHex = assistStatus?.value?.joinToString(" ") { "%02X".format(it) } ?: "null"
+                            Log.d(
+                                TAG,
+                                "Hearing aid status changed: enabled=$aidEnabled HEARING_AID=[$aidHex] HEARING_ASSIST_CONFIG=[$assistHex]"
+                            )
                         }
                     }
                 }
@@ -278,11 +285,16 @@ fun HearingAidScreen(navController: NavController) {
             aacpManager?.sendControlCommand(AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG.value, 0x01.toByte())
             hearingAidEnabled.value = true
             CoroutineScope(Dispatchers.IO).launch {
+                val manager = attManager
+                if (manager == null) {
+                    Log.d(TAG, "Skip disabling transparency: attManager=null (not connected)")
+                    return@launch
+                }
                 try {
-                    val data = attManager.read(ATTHandles.TRANSPARENCY)
+                    val data = manager.read(ATTHandles.TRANSPARENCY)
                     val parsed = parseTransparencySettingsResponse(data)
                     val disabledSettings = parsed.copy(enabled = false)
-                    sendTransparencySettings(attManager, disabledSettings)
+                    sendTransparencySettings(manager, disabledSettings)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error disabling transparency: ${e.message}")
                 }

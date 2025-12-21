@@ -35,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -74,10 +75,9 @@ fun HearingAidAdjustmentsScreen(@Suppress("unused") navController: NavController
     isSystemInDarkTheme()
     val verticalScrollState = rememberScrollState()
     val hazeState = remember { HazeState() }
-    val service = ServiceManager.getService()
-    val attManager = service?.attManager
-    if (attManager == null) {
-        Log.w(TAG, "ATTManager not available, showing placeholder UI")
+    val service = ServiceManager.serviceFlow.collectAsState(initial = ServiceManager.getService()).value
+    if (service == null) {
+        Log.w(TAG, "Service not available, showing placeholder UI")
         StyledScaffold(
             title = stringResource(R.string.adjustments)
         ) { spacerHeight ->
@@ -94,7 +94,37 @@ fun HearingAidAdjustmentsScreen(@Suppress("unused") navController: NavController
         return
     }
 
-    val aacpManager = remember { service.aacpManager }
+    val attManager = service.attManagerFlow.collectAsState(initial = service.attManager).value
+    LaunchedEffect(attManager, service.isConnectedLocally) {
+        if (attManager == null && service.isConnectedLocally) {
+            service.ensureAttConnected("hearing_aid_adjustments_screen")
+        }
+    }
+    if (attManager == null) {
+        Log.w(TAG, "ATTManager not available, showing placeholder UI")
+        StyledScaffold(
+            title = stringResource(R.string.adjustments)
+        ) { spacerHeight ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.Center
+            ) {
+                Spacer(modifier = Modifier.height(spacerHeight))
+                Text(
+                    text = if (service.isConnectedLocally) {
+                        stringResource(R.string.att_manager_is_null_try_reconnecting)
+                    } else {
+                        stringResource(R.string.airpods_not_connected)
+                    }
+                )
+            }
+        }
+        return
+    }
+
+    val aacpManager = remember(service) { service.aacpManager }
     val backdrop = rememberLayerBackdrop()
     StyledScaffold(
         title = stringResource(R.string.adjustments)
@@ -146,8 +176,7 @@ fun HearingAidAdjustmentsScreen(@Suppress("unused") navController: NavController
 
             val hearingAidEnabled = remember {
                 val aidStatus = aacpManager?.controlCommandStatusList?.find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID }
-                val assistStatus = aacpManager?.controlCommandStatusList?.find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG }
-                mutableStateOf((aidStatus?.value?.getOrNull(1) == 0x01.toByte()) && (assistStatus?.value?.getOrNull(0) == 0x01.toByte()))
+                mutableStateOf(aidStatus?.value?.getOrNull(1) == 0x01.toByte())
             }
 
             val hearingAidListener = remember {
@@ -157,7 +186,12 @@ fun HearingAidAdjustmentsScreen(@Suppress("unused") navController: NavController
                             controlCommand.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG.value) {
                             val aidStatus = aacpManager?.controlCommandStatusList?.find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID }
                             val assistStatus = aacpManager?.controlCommandStatusList?.find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG }
-                            hearingAidEnabled.value = (aidStatus?.value?.getOrNull(1) == 0x01.toByte()) && (assistStatus?.value?.getOrNull(0) == 0x01.toByte())
+                            val aidEnabled = aidStatus?.value?.getOrNull(1) == 0x01.toByte()
+                            hearingAidEnabled.value = aidEnabled
+
+                            val aidHex = aidStatus?.value?.joinToString(" ") { "%02X".format(it) } ?: "null"
+                            val assistHex = assistStatus?.value?.joinToString(" ") { "%02X".format(it) } ?: "null"
+                            Log.d(TAG, "Hearing aid status changed: enabled=$aidEnabled HEARING_AID=[$aidHex] HEARING_ASSIST_CONFIG=[$assistHex]")
                         }
                     }
                 }
@@ -193,7 +227,7 @@ fun HearingAidAdjustmentsScreen(@Suppress("unused") navController: NavController
                 aacpManager?.registerControlCommandListener(AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG, hearingAidListener)
             }
 
-            DisposableEffect(Unit) {
+            DisposableEffect(attManager) {
                 onDispose {
                     aacpManager?.unregisterControlCommandListener(AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID, hearingAidListener)
                     aacpManager?.unregisterControlCommandListener(AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG, hearingAidListener)
