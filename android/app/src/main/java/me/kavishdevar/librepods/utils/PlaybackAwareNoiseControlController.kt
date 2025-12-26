@@ -48,6 +48,8 @@ class PlaybackAwareNoiseControlController(
     private var lastKnownIsPlaying: Boolean? = null
     private var lastTransitionAtMs: Long = 0L
     private var isConversationAwarenessActive: Boolean = false
+    private var lastKnownListeningMode: Int? = null
+    private var pausedManualOverride: Boolean = false
 
     private var pendingRevertRunnable: Runnable? = null
     private var pendingRevertExpectedIsPlaying: Boolean? = null
@@ -55,8 +57,22 @@ class PlaybackAwareNoiseControlController(
 
     fun onConversationAwarenessActiveChanged(active: Boolean) {
         isConversationAwarenessActive = active
+        Log.d(TAG, "CA active changed: $active (lastKnownIsPlaying=$lastKnownIsPlaying pausedManualOverride=$pausedManualOverride lastKnownMode=$lastKnownListeningMode)")
+
         if (active) {
             cancelPendingRevert("CA active")
+            return
+        }
+
+        // If CA ended while playback is paused, keep Transparency enforced unless the user
+        // explicitly changed modes while paused.
+        val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
+        val isPaused = lastKnownIsPlaying == false
+        if (enabled && isPaused && !pausedManualOverride) {
+            if (lastKnownListeningMode != TRANSPARENCY_MODE) {
+                Log.d(TAG, "CA ended while paused -> re-enforcing transparency")
+                setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:ca_end", true)
+            }
         }
     }
 
@@ -64,6 +80,7 @@ class PlaybackAwareNoiseControlController(
         val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
         if (!enabled) {
             lastKnownIsPlaying = isPlaying
+            pausedManualOverride = false
             cancelPendingRevert("disabled")
             return
         }
@@ -82,14 +99,17 @@ class PlaybackAwareNoiseControlController(
         }
         lastTransitionAtMs = now
         lastKnownIsPlaying = isPlaying
+        if (!isPlaying) {
+            // New paused session: allow user override tracking to reset.
+            pausedManualOverride = false
+        }
         cancelPendingRevert("playback state changed")
 
-        if (isConversationAwarenessActive) {
-            Log.d(TAG, "Skipping mode enforcement during Conversational Awareness source=$source isPlaying=$isPlaying")
-            return
-        }
-
         if (isPlaying) {
+            if (isConversationAwarenessActive) {
+                Log.d(TAG, "Skipping mode enforcement during Conversational Awareness source=$source isPlaying=$isPlaying")
+                return
+            }
             val activeMode = getPreferredActiveMode()
             Log.d(TAG, "Playback started -> enforcing active mode=$activeMode source=$source")
             setListeningMode(activeMode, "AutoTransparency:play:$source", true)
@@ -100,6 +120,7 @@ class PlaybackAwareNoiseControlController(
     }
 
     fun onListeningModeChanged(newMode: Int, fromAuto: Boolean) {
+        lastKnownListeningMode = newMode
         val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
         if (!enabled) return
         if (fromAuto) return
@@ -124,6 +145,7 @@ class PlaybackAwareNoiseControlController(
                 }
             }
         } else {
+            pausedManualOverride = true
             if (forceUiSelection) {
                 val desired = TRANSPARENCY_MODE
                 if (newMode != desired) {
@@ -189,4 +211,3 @@ class PlaybackAwareNoiseControlController(
         private const val DEFAULT_MANUAL_OVERRIDE_TIMEOUT_MS = 60_000
     }
 }
-
