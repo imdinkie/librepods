@@ -121,6 +121,8 @@ import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_RIGHT_
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_RIGHT_CHARGING
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_RIGHT_ICON
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_RIGHT_LOW_BATTERY_THRESHOLD
+import me.kavishdevar.librepods.utils.PlaybackAwareNoiseControlController
+import me.kavishdevar.librepods.utils.PlaybackAwareNoiseControlPrefs
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -167,6 +169,18 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
     var airpodsInstance: AirPodsInstance? = null
     var cameraActive = false
+
+    private val playbackAwareNoiseControlController: PlaybackAwareNoiseControlController by lazy {
+        PlaybackAwareNoiseControlController(
+            getSharedPreferences("settings", MODE_PRIVATE),
+            Handler(Looper.getMainLooper()),
+        ) { mode, source, isAuto ->
+            setListeningMode(mode, source, isAuto)
+        }
+    }
+    private var lastAutoListeningModeSetAtMs: Long = 0L
+    private var lastAutoListeningModeSetMode: Int? = null
+
     private var disconnectedBecauseReversed = false
     private var otherDeviceTookOver = false
     data class ServiceConfig(
@@ -580,6 +594,24 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     false
                 )
 
+                // Playback‑Aware Noise Control ("Auto Transparency")
+                if (!contains(PlaybackAwareNoiseControlPrefs.ENABLED)) putBoolean(
+                    PlaybackAwareNoiseControlPrefs.ENABLED,
+                    false
+                )
+                if (!contains(PlaybackAwareNoiseControlPrefs.FORCE_UI_SELECTION)) putBoolean(
+                    PlaybackAwareNoiseControlPrefs.FORCE_UI_SELECTION,
+                    false
+                )
+                if (!contains(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE)) putInt(
+                    PlaybackAwareNoiseControlPrefs.ACTIVE_MODE,
+                    4
+                )
+                if (!contains(PlaybackAwareNoiseControlPrefs.MANUAL_OVERRIDE_TIMEOUT_MS)) putInt(
+                    PlaybackAwareNoiseControlPrefs.MANUAL_OVERRIDE_TIMEOUT_MS,
+                    60_000
+                )
+
                 // AirPods state-based takeover
                 if (!contains("takeover_when_disconnected")) putBoolean(
                     "takeover_when_disconnected",
@@ -726,6 +758,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 MODE_PRIVATE
             )
         )
+        MediaController.setPlaybackStateListener { isPlaying ->
+            playbackAwareNoiseControlController.onPlaybackStateChanged(isPlaying)
+        }
 //        Log.d(TAG, "Initializing CrossDevice")
 //        CoroutineScope(Dispatchers.IO).launch {
 //            CrossDevice.init(this@AirPodsService)
@@ -1084,8 +1119,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 })
 
                 if (conversationAwarenessNotification.status == 1.toByte() || conversationAwarenessNotification.status == 2.toByte()) {
+                    playbackAwareNoiseControlController.onConversationAwarenessActiveChanged(true)
                     MediaController.startSpeaking()
                 } else if (conversationAwarenessNotification.status == 8.toByte() || conversationAwarenessNotification.status == 9.toByte()) {
+                    playbackAwareNoiseControlController.onConversationAwarenessActiveChanged(false)
                     MediaController.stopSpeaking()
                 }
 
@@ -1098,9 +1135,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             override fun onControlCommandReceived(controlCommand: ByteArray) {
                 val command = AACPManager.ControlCommand.fromByteArray(controlCommand)
                 if (command.identifier == AACPManager.Companion.ControlCommandIdentifiers.LISTENING_MODE.value) {
-                    ancNotification.setStatus(byteArrayOf(command.value.takeIf { it.isNotEmpty() }?.get(0) ?: 0x00.toByte()))
+                    val mode = command.value.takeIf { it.isNotEmpty() }?.get(0)?.toInt() ?: 0
+                    val fromAuto = isRecentAutoListeningMode(mode)
+                    Log.d(TAG, "Listening mode update: mode=$mode fromAuto=$fromAuto")
+                    ancNotification.setStatus(byteArrayOf(mode.toByte()))
                     sendANCBroadcast()
                     updateNoiseControlWidget()
+                    playbackAwareNoiseControlController.onListeningModeChanged(
+                        newMode = mode,
+                        fromAuto = fromAuto
+                    )
                 }
             }
 
@@ -1949,6 +1993,80 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         sendBroadcast(Intent(AirPodsNotifications.ANC_DATA).apply {
             putExtra("data", ancNotification.status)
         })
+    }
+
+    private fun isRecentAutoListeningMode(mode: Int): Boolean {
+        val lastMode = lastAutoListeningModeSetMode ?: return false
+        if (lastMode != mode) return false
+        val sinceMs = SystemClock.uptimeMillis() - lastAutoListeningModeSetAtMs
+        return sinceMs in 0..5000
+    }
+
+    private fun getEnabledListeningModes(): Set<Int> {
+        val allowOffModeValue =
+            aacpManager.controlCommandStatusList.find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.ALLOW_OFF_OPTION }
+        val allowOffMode =
+            allowOffModeValue?.value?.takeIf { it.isNotEmpty() }?.get(0) == 0x01.toByte()
+
+        val configsByteFromDevice = aacpManager.controlCommandStatusList
+            .find { it.identifier == AACPManager.Companion.ControlCommandIdentifiers.LISTENING_MODE_CONFIGS }
+            ?.value
+            ?.takeIf { it.isNotEmpty() }
+            ?.get(0)
+            ?.toInt()
+
+        val configsByteFromPrefs = sharedPreferences.getInt("long_press_byte", 0b0110)
+        val rawConfigsByte = configsByteFromDevice ?: configsByteFromPrefs
+        val effectiveConfigsByte = if (allowOffMode) rawConfigsByte else rawConfigsByte and 0xFE
+
+        val enabledModes = buildSet {
+            if (allowOffMode && (effectiveConfigsByte and 0x01) != 0) add(1) // Off
+            if ((effectiveConfigsByte and 0x02) != 0) add(2) // Noise Cancellation
+            if ((effectiveConfigsByte and 0x04) != 0) add(3) // Transparency
+            if ((effectiveConfigsByte and 0x08) != 0) add(4) // Adaptive
+        }
+
+        return enabledModes.ifEmpty {
+            if (allowOffMode) setOf(1, 2, 3, 4) else setOf(2, 3, 4)
+        }
+    }
+
+    fun setListeningMode(requestedMode: Int, source: String, isAuto: Boolean): Boolean {
+        if (requestedMode !in 1..4) return false
+
+        val socketConnected = this::socket.isInitialized && socket.isConnected
+        if (!socketConnected) {
+            Log.d(TAG, "Skipping listening mode set; socket not connected (mode=$requestedMode source=$source)")
+            return false
+        }
+
+        val enabledModes = getEnabledListeningModes()
+        val fallbackOrder = when (requestedMode) {
+            3 -> listOf(3, 4, 2, 1) // Pause -> strongly prefer transparency
+            4 -> listOf(4, 2, 3, 1)
+            2 -> listOf(2, 4, 3, 1)
+            else -> listOf(requestedMode, 2, 3, 4, 1)
+        }
+        val mode = fallbackOrder.firstOrNull { it in enabledModes }
+        if (mode == null) {
+            Log.d(TAG, "Skipping listening mode set; no enabled mode available (requested=$requestedMode enabled=$enabledModes source=$source)")
+            return false
+        }
+
+        if (mode != requestedMode) {
+            Log.d(TAG, "Listening mode fallback: requested=$requestedMode -> $mode enabled=$enabledModes source=$source")
+        }
+
+        if (isAuto) {
+            lastAutoListeningModeSetAtMs = SystemClock.uptimeMillis()
+            lastAutoListeningModeSetMode = mode
+        }
+
+        aacpManager.sendControlCommand(
+            AACPManager.Companion.ControlCommandIdentifiers.LISTENING_MODE.value,
+            mode
+        )
+        return true
     }
 
     fun sendBatteryBroadcast() {

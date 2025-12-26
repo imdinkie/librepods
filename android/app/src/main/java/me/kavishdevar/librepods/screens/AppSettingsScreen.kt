@@ -26,6 +26,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -84,6 +85,7 @@ import me.kavishdevar.librepods.composables.StyledScaffold
 import me.kavishdevar.librepods.composables.StyledSlider
 import me.kavishdevar.librepods.composables.StyledToggle
 import me.kavishdevar.librepods.utils.AACPManager
+import me.kavishdevar.librepods.utils.PlaybackAwareNoiseControlPrefs
 import me.kavishdevar.librepods.utils.RadareOffsetFinder
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -154,6 +156,17 @@ fun AppSettingsScreen(navController: NavController) {
     val disconnectWhenNotWearing = remember {
         mutableStateOf(sharedPreferences.getBoolean("disconnect_when_not_wearing", false))
     }
+
+    val playbackAwareNoiseControlEnabled = remember {
+        mutableStateOf(sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false))
+    }
+    val playbackAwareForceUiSelection = remember {
+        mutableStateOf(sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.FORCE_UI_SELECTION, false))
+    }
+    val playbackAwareActiveMode = remember {
+        mutableStateOf(sharedPreferences.getInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE, 4))
+    }
+    val showPlaybackAwareActiveModeDialog = remember { mutableStateOf(false) }
 
     val takeoverWhenDisconnected = remember {
         mutableStateOf(sharedPreferences.getBoolean("takeover_when_disconnected", true))
@@ -327,6 +340,121 @@ fun AppSettingsScreen(navController: NavController) {
             )
 
             Text(
+                text = stringResource(R.string.playback_aware_noise_control),
+                style = TextStyle(
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = textColor.copy(alpha = 0.6f),
+                    fontFamily = FontFamily(Font(R.font.sf_pro))
+                ),
+                modifier = Modifier.padding(16.dp, bottom = 2.dp, top = 24.dp)
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        backgroundColor,
+                        RoundedCornerShape(28.dp)
+                    )
+                    .padding(vertical = 4.dp)
+            ) {
+                StyledToggle(
+                    label = stringResource(R.string.auto_transparency),
+                    description = null,
+                    checkedState = playbackAwareNoiseControlEnabled,
+                    onCheckedChange = {
+                        playbackAwareNoiseControlEnabled.value = it
+                        sharedPreferences.edit { putBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, it) }
+                    },
+                    independent = false
+                )
+
+                if (playbackAwareNoiseControlEnabled.value) {
+                    HorizontalDivider(
+                        thickness = 1.dp,
+                        color = Color(0x40888888),
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+
+                    StyledToggle(
+                        label = stringResource(R.string.force_ui_selection),
+                        description = null,
+                        checkedState = playbackAwareForceUiSelection,
+                        onCheckedChange = {
+                            playbackAwareForceUiSelection.value = it
+                            sharedPreferences.edit { putBoolean(PlaybackAwareNoiseControlPrefs.FORCE_UI_SELECTION, it) }
+                        },
+                        independent = false
+                    )
+
+                    HorizontalDivider(
+                        thickness = 1.dp,
+                        color = Color(0x40888888),
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+
+                    val activeModeLabel = when (playbackAwareActiveMode.value) {
+                        2 -> stringResource(R.string.noise_cancellation)
+                        3 -> stringResource(R.string.transparency)
+                        4 -> stringResource(R.string.adaptive)
+                        else -> stringResource(R.string.adaptive)
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(
+                                onClick = { showPlaybackAwareActiveModeDialog.value = true },
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() }
+                            )
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = stringResource(R.string.auto_transparency_active_mode),
+                            fontSize = 16.sp,
+                            color = textColor
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                        Text(
+                            text = activeModeLabel,
+                            fontSize = 16.sp,
+                            color = textColor.copy(alpha = 0.8f)
+                        )
+                        Text(
+                            text = "􀯻",
+                            style = TextStyle(
+                                fontSize = 16.sp,
+                                fontFamily = FontFamily(Font(R.font.sf_pro)),
+                                color = textColor.copy(alpha = 0.6f)
+                            ),
+                            modifier = Modifier.padding(start = 6.dp)
+                        )
+                    }
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .background(if (isDarkTheme) Color(0xFF000000) else Color(0xFFF2F2F7))
+            ) {
+                Text(
+                    text = stringResource(R.string.auto_transparency_description),
+                    style = TextStyle(
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Light,
+                        color = textColor.copy(alpha = 0.6f),
+                        fontFamily = FontFamily(Font(R.font.sf_pro))
+                    )
+                )
+            }
+
+            Text(
                 text = stringResource(R.string.takeover_airpods_state),
                 style = TextStyle(
                     fontSize = 14.sp,
@@ -459,6 +587,57 @@ fun AppSettingsScreen(navController: NavController) {
                         sharedPreferences.edit { putBoolean("takeover_when_media_start", it)}
                     },
                     independent = false
+                )
+            }
+
+            if (showPlaybackAwareActiveModeDialog.value) {
+                AlertDialog(
+                    onDismissRequest = { showPlaybackAwareActiveModeDialog.value = false },
+                    title = { Text(text = stringResource(R.string.auto_transparency_active_mode)) },
+                    text = {
+                        Column {
+                            listOf(
+                                4 to stringResource(R.string.adaptive),
+                                2 to stringResource(R.string.noise_cancellation),
+                                3 to stringResource(R.string.transparency),
+                            ).forEach { (mode, label) ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            playbackAwareActiveMode.value = mode
+                                            sharedPreferences.edit { putInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE, mode) }
+                                            showPlaybackAwareActiveModeDialog.value = false
+                                        }
+                                        .padding(vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = label,
+                                        fontSize = 16.sp,
+                                        color = textColor
+                                    )
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    if (playbackAwareActiveMode.value == mode) {
+                                        Text(
+                                            text = "􀆅",
+                                            style = TextStyle(
+                                                fontSize = 16.sp,
+                                                fontFamily = FontFamily(Font(R.font.sf_pro)),
+                                                color = textColor.copy(alpha = 0.8f)
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {},
+                    dismissButton = {
+                        TextButton(onClick = { showPlaybackAwareActiveModeDialog.value = false }) {
+                            Text(text = stringResource(R.string.back))
+                        }
+                    }
                 )
             }
 
