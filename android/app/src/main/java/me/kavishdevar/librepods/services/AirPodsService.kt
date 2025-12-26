@@ -273,7 +273,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private val remoteCloseStreakWindowMs = 60000L
     private val localDisconnectGraceMs = 2000L
     private val remoteCloseBackoffUserIntentCapMs = 1500L
-    private val aclStabilityDelayMs = 6000L
+    // When ACL is flapping we suppress auto socket connects briefly to avoid reconnect loops.
+    private val aclSuppressionDefaultMs = 6000L
+    // For remote_eof-triggered drops while actively listening, prefer a faster recovery attempt.
+    private val aclSuppressionRemoteEofMs = 1000L
+    // If we only see ACL_CONNECTED (no profile CONNECTED), attempt a socket connect sooner than
+    // the flapping suppression window to keep initial connections feeling responsive.
+    private val aclStableRetryDelayMs = 1200L
 
     private val aclStableConnectLock = Any()
     @Volatile private var aclStableConnectGeneration = 0L
@@ -286,6 +292,15 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private var a2dpReceiverTimeoutRunnable: Runnable? = null
 
     private var batteryRuleDisconnectedAudio = false
+
+    @Volatile private var lastRemoteEofAtMs: Long = 0L
+    @Volatile private var lastRemoteEofDeviceAddress: String? = null
+    @Volatile private var lastAclDisconnectCause: String? = null
+
+    @Volatile private var transportRecoveryPending = false
+    @Volatile private var transportRecoveryArmedAtMs: Long = 0L
+    @Volatile private var transportRecoveryDeviceAddress: String? = null
+    @Volatile private var transportRecoveryWasMusicActive = false
 
     private val bleStatusListener = object : BLEManager.AirPodsStatusListener {
         @SuppressLint("NewApi")
@@ -793,11 +808,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         Log.d(TAG, "${config.deviceName} connected")
                         CoroutineScope(Dispatchers.IO).launch {
                             val nowElapsedMs = SystemClock.elapsedRealtime()
+                            maybeTriggerTransportRecovery(
+                                trigger = "AIRPODS_CONNECTION_DETECTED:$trigger",
+                                deviceAddress = device!!.address
+                            )
                             if (!manual && shouldSkipAutoConnectBecauseAclUnstable(nowElapsedMs)) {
                                 val sinceDisconnectMs = nowElapsedMs - lastAclDisconnectedAtMs
+                                val suppressionMs = aclSuppressionMs(nowElapsedMs)
                                 Log.d(
                                     TAG,
-                                    "CONN skip: ACL recently disconnected (sinceDisconnectMs=$sinceDisconnectMs trigger=$trigger)"
+                                    "CONN skip: ACL recently disconnected (sinceDisconnectMs=$sinceDisconnectMs suppressionMs=$suppressionMs trigger=$trigger)"
                                 )
                                 return@launch
                             }
@@ -1415,13 +1435,18 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     private fun resumePlaybackAfterA2dpReady(source: String) {
         val shouldResume = pendingPlaybackResumeAfterA2dp || MediaController.pausedWhileTakingOver
+        val forcePlay = pendingPlaybackResumeReason?.startsWith("transport_recovery") == true
         Log.d(
             TAG,
             "A2DP ready: source=$source shouldResume=$shouldResume pending=$pendingPlaybackResumeAfterA2dp pendingReason=$pendingPlaybackResumeReason pausedWhileTakingOver=${MediaController.pausedWhileTakingOver} isMusicActive=${MediaController.getMusicActive()}"
         )
 
         if (shouldResume) {
-            MediaController.sendPlay(replayWhenPaused = true)
+            if (!forcePlay || !MediaController.getMusicActive()) {
+                MediaController.sendPlay(replayWhenPaused = true, force = forcePlay)
+            } else {
+                Log.d(TAG, "A2DP ready: transport recovery resume skipped (already playing)")
+            }
             MediaController.iPausedTheMedia = false
         }
 
@@ -2983,7 +3008,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 val gen = aclStableConnectGeneration
                 aclStableConnectJob?.cancel()
                 aclStableConnectJob = CoroutineScope(Dispatchers.IO).launch {
-                    delay(aclStabilityDelayMs)
+                    delay(aclStableRetryDelayMs)
                     synchronized(aclStableConnectLock) {
                         if (aclStableConnectGeneration != gen) return@launch
                     }
@@ -2991,32 +3016,107 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     val now = SystemClock.elapsedRealtime()
                     val sinceDisconnectMs =
                         if (lastAclDisconnectedAtMs > 0L) now - lastAclDisconnectedAtMs else Long.MAX_VALUE
-                    if (sinceDisconnectMs < aclStabilityDelayMs) {
-                        Log.d(TAG, "CONN stable ACL retry aborted: sinceDisconnectMs=$sinceDisconnectMs (<$aclStabilityDelayMs)")
+                    val suppressionMs = aclSuppressionMs(now)
+                    if (sinceDisconnectMs < suppressionMs) {
+                        Log.d(
+                            TAG,
+                            "CONN stable ACL retry aborted: sinceDisconnectMs=$sinceDisconnectMs (<$suppressionMs)"
+                        )
                         return@launch
                     }
-                    Log.d(TAG, "CONN stable ACL retry: attempting socket connect after ${aclStabilityDelayMs}ms")
+                    Log.d(TAG, "CONN stable ACL retry: attempting socket connect after ${aclStableRetryDelayMs}ms")
                     connectToSocket(bluetoothDevice, manual = false, reason = "acl_stable_retry")
                 }
                 gen
             }
-            Log.d(TAG, "ACL_CONNECTED observed: device=${bluetoothDevice.address} reason=$reason scheduledStableConnectMs=$aclStabilityDelayMs gen=$generation")
+            Log.d(
+                TAG,
+                "ACL_CONNECTED observed: device=${bluetoothDevice.address} reason=$reason scheduledStableConnectMs=$aclStableRetryDelayMs gen=$generation"
+            )
         } else {
             lastAclDisconnectedAtMs = nowElapsedMs
+            lastAclDisconnectCause =
+                if (nowElapsedMs - lastRemoteEofAtMs in 0..5000L &&
+                    lastRemoteEofDeviceAddress == bluetoothDevice.address) {
+                    "remote_eof"
+                } else {
+                    "other"
+                }
             synchronized(aclStableConnectLock) {
                 aclStableConnectGeneration += 1
                 aclStableConnectJob?.cancel()
                 aclStableConnectJob = null
             }
-            Log.d(TAG, "ACL_DISCONNECTED observed: device=${bluetoothDevice.address} reason=$reason")
+            Log.d(
+                TAG,
+                "ACL_DISCONNECTED observed: device=${bluetoothDevice.address} reason=$reason cause=$lastAclDisconnectCause"
+            )
         }
+    }
+
+    private fun aclSuppressionMs(nowElapsedMs: Long): Long {
+        val cause = lastAclDisconnectCause
+        if (cause == "remote_eof") {
+            return aclSuppressionRemoteEofMs
+        }
+        val sinceRemoteEofMs = nowElapsedMs - lastRemoteEofAtMs
+        if (sinceRemoteEofMs in 0..5000L && transportRecoveryPending) {
+            return aclSuppressionRemoteEofMs
+        }
+        return aclSuppressionDefaultMs
     }
 
     private fun shouldSkipAutoConnectBecauseAclUnstable(nowElapsedMs: Long): Boolean {
         val lastDisconnect = lastAclDisconnectedAtMs
         if (lastDisconnect <= 0L) return false
         val sinceDisconnectMs = nowElapsedMs - lastDisconnect
-        return sinceDisconnectMs in 0 until aclStabilityDelayMs
+        val suppressionMs = aclSuppressionMs(nowElapsedMs)
+        return sinceDisconnectMs in 0 until suppressionMs
+    }
+
+    private fun armTransportRecovery(reason: String, deviceAddress: String, nowElapsedMs: Long) {
+        val musicActive = MediaController.getMusicActive()
+        transportRecoveryPending = true
+        transportRecoveryArmedAtMs = nowElapsedMs
+        transportRecoveryDeviceAddress = deviceAddress
+        transportRecoveryWasMusicActive = musicActive
+        lastRemoteEofAtMs = nowElapsedMs
+        lastRemoteEofDeviceAddress = deviceAddress
+        Log.d(
+            TAG,
+            "Transport recovery armed: reason=$reason device=$deviceAddress wasMusicActive=$musicActive remoteCloseStreak=$remoteCloseStreak"
+        )
+        if (musicActive) {
+            capRemoteCloseBackoff(
+                maxRemainingMs = remoteCloseBackoffUserIntentCapMs,
+                reason = "transport_recovery"
+            )
+        }
+    }
+
+    private fun maybeTriggerTransportRecovery(trigger: String, deviceAddress: String) {
+        if (!transportRecoveryPending) return
+        if (transportRecoveryDeviceAddress != null && transportRecoveryDeviceAddress != deviceAddress) return
+
+        val nowElapsedMs = SystemClock.elapsedRealtime()
+        val sinceArmedMs = nowElapsedMs - transportRecoveryArmedAtMs
+        if (sinceArmedMs !in 0..15000L) {
+            Log.d(TAG, "Transport recovery expired: sinceArmedMs=$sinceArmedMs trigger=$trigger")
+            transportRecoveryPending = false
+            transportRecoveryDeviceAddress = null
+            transportRecoveryWasMusicActive = false
+            return
+        }
+        if (!transportRecoveryWasMusicActive) {
+            Log.d(TAG, "Transport recovery skip: wasMusicActive=false trigger=$trigger sinceArmedMs=$sinceArmedMs")
+            transportRecoveryPending = false
+            transportRecoveryDeviceAddress = null
+            return
+        }
+
+        Log.d(TAG, "Transport recovery: requesting playback resume (trigger=$trigger sinceArmedMs=$sinceArmedMs)")
+        transportRecoveryPending = false
+        requestPlaybackResumeAfterA2dpConnected("transport_recovery")
     }
 
     private fun clearConnectBackoff(reason: String) {
@@ -3314,6 +3414,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         val nowElapsedMs = SystemClock.elapsedRealtime()
                         val sinceLocalDisconnectMs = nowElapsedMs - lastLocalDisconnectAtMs
                         if (readLoopReason != null && sinceLocalDisconnectMs > localDisconnectGraceMs) {
+                            if (readLoopReason == "remote_eof") {
+                                armTransportRecovery(
+                                    reason = "remote_eof",
+                                    deviceAddress = device.address,
+                                    nowElapsedMs = nowElapsedMs
+                                )
+                            }
                             recordRemoteClose("readLoopEnded:${readLoopReason}")
                         } else if (readLoopReason != null) {
                             Log.d(TAG, "CONN read loop ended after local disconnect (reason=$readLoopReason)")
