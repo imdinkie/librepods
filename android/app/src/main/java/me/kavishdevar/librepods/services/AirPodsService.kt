@@ -2572,6 +2572,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     private var phoneBatteryReceiverRegistered = false
 
+    @Volatile private var pendingMusicTakeoverRetry = false
+    @Volatile private var lastMusicTakeoverRetryAtMs: Long = 0L
+
     @SuppressLint("InlinedApi", "MissingPermission", "UnspecifiedRegisterReceiverFlag")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "Service started with intent action: ${intent?.action}")
@@ -2603,9 +2606,54 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             connectAudio(this@AirPodsService, device, reason = "takeover_reverse")
             otherDeviceTookOver = false
         }
-        Log.d(TAG, "owns connection: ${aacpManager.getControlCommandStatus(AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION)?.value?.get(0)?.toInt()}")
+        val ownsStatus = aacpManager
+            .getControlCommandStatus(AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION)
+            ?.value
+            ?.getOrNull(0)
+            ?.toInt()
+        val audioSource = aacpManager.audioSource
+        val connectedDeviceCount = aacpManager.connectedDevices.size
+        Log.d(
+            TAG,
+            "owns connection: $ownsStatus (connectedDevices=$connectedDeviceCount audioSource=${audioSource?.mac}:${audioSource?.type} localMac=$localMac)"
+        )
         if (isConnectedLocally) {
-            if (aacpManager.getControlCommandStatus(AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION)?.value[0]?.toInt() != 1 || (aacpManager.audioSource?.mac != localMac && aacpManager.audioSource?.type != AACPManager.Companion.AudioSourceType.NONE)) {
+            val ownershipKnown = ownsStatus != null
+            val shouldConsiderHijack =
+                ownershipKnown &&
+                    connectedDeviceCount > 1 &&
+                    (ownsStatus != 1 ||
+                        (audioSource != null &&
+                            audioSource.type != AACPManager.Companion.AudioSourceType.NONE &&
+                            audioSource.mac != localMac))
+
+            if (!shouldConsiderHijack && takingOverFor == "music" && MediaController.getMusicActive()) {
+                if (!ownershipKnown || connectedDeviceCount <= 1 || audioSource == null) {
+                    val nowElapsedMs = SystemClock.elapsedRealtime()
+                    val sinceLastRetryMs = nowElapsedMs - lastMusicTakeoverRetryAtMs
+                    Log.d(
+                        TAG,
+                        "Takeover(music): skip pause/hijack (ownershipKnown=$ownershipKnown connectedDevices=$connectedDeviceCount audioSourcePresent=${audioSource != null} sinceLastRetryMs=$sinceLastRetryMs)"
+                    )
+                    if (!pendingMusicTakeoverRetry && sinceLastRetryMs > 2000L) {
+                        pendingMusicTakeoverRetry = true
+                        lastMusicTakeoverRetryAtMs = nowElapsedMs
+                        mainHandler.postDelayed(
+                            {
+                                pendingMusicTakeoverRetry = false
+                                if (isConnectedLocally && MediaController.getMusicActive()) {
+                                    Log.d(TAG, "Takeover(music): retrying after ownership/device-list warmup")
+                                    takeOver("music")
+                                }
+                            },
+                            800L
+                        )
+                    }
+                    return
+                }
+            }
+
+            if (shouldConsiderHijack) {
                 if (disconnectedBecauseReversed) {
                     if (manualTakeOverAfterReversed) {
                         Log.d(TAG, "forcefully taking over despite reverse as user requested")
@@ -2651,7 +2699,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     )
                 }
             } else {
-                Log.d(TAG, "Already connected locally and already own connection, skipping takeover")
+                Log.d(TAG, "Already connected locally; skipping takeover (ownershipKnown=$ownershipKnown connectedDevices=$connectedDeviceCount)")
             }
             return
         }
