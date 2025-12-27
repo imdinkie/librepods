@@ -3504,6 +3504,21 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
             Log.d(TAG, "CONN socket.connect success: device=${device.address}")
 
+            // Apply Playback‑Aware Noise Control once after transport is ready so the initial
+            // connect state doesn't rely on a playback transition.
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    val isPlaying = MediaController.getLastNotifiedPlaybackState() ?: MediaController.getMusicActive()
+                    Log.d(TAG, "Playback-Aware NC: socket-ready apply (isPlaying=$isPlaying)")
+                    playbackAwareNoiseControlController.onTransportReady(
+                        isPlaying = isPlaying,
+                        source = "socket_ready"
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Playback-Aware NC: socket-ready apply failed: ${e.localizedMessage}")
+                }
+            }, 350L)
+
             // ATT is optional; do not abort the main connection if it fails.
             attManager = try {
                 ATTManager(device).also { it.connect() }

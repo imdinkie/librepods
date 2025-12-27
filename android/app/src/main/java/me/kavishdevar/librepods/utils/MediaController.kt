@@ -77,6 +77,10 @@ object MediaController {
         playbackStateListener = listener
     }
 
+    fun getLastNotifiedPlaybackState(): Boolean? {
+        return lastNotifiedIsMusicActive
+    }
+
     fun initialize(audioManager: AudioManager, sharedPreferences: SharedPreferences) {
         if (this::audioManager.isInitialized) {
             return
@@ -222,7 +226,7 @@ object MediaController {
     ): Boolean {
         if (!isMusicActive) return false
         val list = configs ?: return false
-        return list.any { config ->
+        val result = list.any { config ->
             val attrs = config.audioAttributes ?: return@any false
             val isMediaUsage = attrs.usage == AudioAttributes.USAGE_MEDIA
             val isMusicOrMovie =
@@ -236,11 +240,19 @@ object MediaController {
 
             started && isMediaUsage && isMusicOrMovie
         }
+        if (!result && isMusicActive && list.isNotEmpty()) {
+            Log.d("MediaController", "isMusicActive=true but no started media configs detected; treating as paused (configs=${list.size})")
+        }
+        return result
     }
 
     private fun maybeNotifyPlaybackStateChanged(now: Long, isPlayingMedia: Boolean) {
-        if (now - lastPlaybackStateNotifyAt < PLAYBACK_STATE_NOTIFY_DEBOUNCE_MS) {
-            return
+        // Only debounce duplicate state reports; allow fast true transitions (e.g. track switch)
+        // so playback-aware features don't get stuck.
+        if (lastNotifiedIsMusicActive == isPlayingMedia) {
+            if (now - lastPlaybackStateNotifyAt < PLAYBACK_STATE_NOTIFY_DEBOUNCE_MS) {
+                return
+            }
         }
         lastPlaybackStateNotifyAt = now
 
@@ -252,6 +264,7 @@ object MediaController {
             return
         }
 
+        Log.d("MediaController", "Notifying playback state listener: isPlayingMedia=$isPlayingMedia (prev=$lastNotifiedIsMusicActive)")
         lastNotifiedIsMusicActive = isPlayingMedia
         playbackStateListener?.invoke(isPlayingMedia)
     }

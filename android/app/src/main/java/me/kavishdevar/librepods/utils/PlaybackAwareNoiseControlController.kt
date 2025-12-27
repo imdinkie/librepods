@@ -51,11 +51,19 @@ class PlaybackAwareNoiseControlController(
     private var lastKnownListeningMode: Int? = null
     private var pausedManualOverride: Boolean = false
 
+    private var transportBaselineUntilMs: Long? = null
+
+    private var pendingPauseEnforceRunnable: Runnable? = null
+    private var pendingPauseEnforceAtMs: Long? = null
+
     private var pendingRevertRunnable: Runnable? = null
     private var pendingRevertExpectedIsPlaying: Boolean? = null
     private var pendingRevertMode: Int? = null
 
     fun onConversationAwarenessActiveChanged(active: Boolean) {
+        val wasActive = isConversationAwarenessActive
+        if (wasActive == active) return
+
         isConversationAwarenessActive = active
         Log.d(TAG, "CA active changed: $active (lastKnownIsPlaying=$lastKnownIsPlaying pausedManualOverride=$pausedManualOverride lastKnownMode=$lastKnownListeningMode)")
 
@@ -68,7 +76,7 @@ class PlaybackAwareNoiseControlController(
         // explicitly changed modes while paused.
         val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
         val isPaused = lastKnownIsPlaying == false
-        if (enabled && isPaused && !pausedManualOverride) {
+        if (enabled && wasActive && isPaused && !pausedManualOverride) {
             if (lastKnownListeningMode != TRANSPARENCY_MODE) {
                 Log.d(TAG, "CA ended while paused -> re-enforcing transparency")
                 setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:ca_end", true)
@@ -81,6 +89,8 @@ class PlaybackAwareNoiseControlController(
         if (!enabled) {
             lastKnownIsPlaying = isPlaying
             pausedManualOverride = false
+            transportBaselineUntilMs = null
+            cancelPendingPauseEnforce("disabled")
             cancelPendingRevert("disabled")
             return
         }
@@ -90,10 +100,13 @@ class PlaybackAwareNoiseControlController(
             return
         }
 
+        Log.d(TAG, "Playback state changed: ${lastKnownIsPlaying} -> $isPlaying source=$source CA=$isConversationAwarenessActive")
+
         // Debounce transitions so short blips don't thrash ANC modes.
-        val debounceMs = 500L
+        // Still allow true flips; only suppress repeated flapping.
+        val debounceMs = 200L
         if (now - lastTransitionAtMs < debounceMs) {
-            Log.d(TAG, "Ignoring playback transition due to debounce (${now - lastTransitionAtMs}ms) source=$source")
+            Log.d(TAG, "Ignoring playback transition due to debounce (${now - lastTransitionAtMs}ms) source=$source isPlaying=$isPlaying")
             lastKnownIsPlaying = isPlaying
             return
         }
@@ -106,6 +119,7 @@ class PlaybackAwareNoiseControlController(
         cancelPendingRevert("playback state changed")
 
         if (isPlaying) {
+            cancelPendingPauseEnforce("playback resumed")
             if (isConversationAwarenessActive) {
                 Log.d(TAG, "Skipping mode enforcement during Conversational Awareness source=$source isPlaying=$isPlaying")
                 return
@@ -114,12 +128,78 @@ class PlaybackAwareNoiseControlController(
             Log.d(TAG, "Playback started -> enforcing active mode=$activeMode source=$source")
             setListeningMode(activeMode, "AutoTransparency:play:$source", true)
         } else {
-            Log.d(TAG, "Playback paused -> enforcing transparency source=$source")
-            setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:pause:$source", true)
+            // Track switches can produce micro-pauses (empty configs) that should not trigger a mode change.
+            // Use a short grace window and cancel if playback resumes quickly.
+            schedulePauseEnforceTransparency(source, now)
+        }
+    }
+
+    fun onTransportReady(isPlaying: Boolean, source: String) {
+        val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
+        if (!enabled) return
+
+        val now = SystemClock.uptimeMillis()
+        transportBaselineUntilMs = now + TRANSPORT_BASELINE_WINDOW_MS
+
+        // New session. Clear any previous timers and paused manual override.
+        pausedManualOverride = false
+        cancelPendingPauseEnforce("transport ready")
+        cancelPendingRevert("transport ready")
+
+        // Update our notion of playback state, but apply policy even if the state didn't change.
+        lastKnownIsPlaying = isPlaying
+        Log.d(TAG, "Transport ready: baselineWindowMs=$TRANSPORT_BASELINE_WINDOW_MS isPlaying=$isPlaying source=$source")
+        applyPolicyNow(source = "transport_ready:$source", immediatePauseEnforce = true)
+
+        handler.postDelayed(
+            {
+                val stillEnabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
+                if (!stillEnabled) return@postDelayed
+                val baselineEnd = transportBaselineUntilMs
+                if (baselineEnd != null && SystemClock.uptimeMillis() < baselineEnd) return@postDelayed
+                transportBaselineUntilMs = null
+                Log.d(TAG, "Transport baseline window ended")
+                applyPolicyNow(source = "transport_ready_baseline_end:$source", immediatePauseEnforce = false)
+            },
+            TRANSPORT_BASELINE_WINDOW_MS
+        )
+    }
+
+    fun applyPolicyNow(source: String, immediatePauseEnforce: Boolean) {
+        val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
+        if (!enabled) return
+
+        val isPlaying = lastKnownIsPlaying
+        if (isPlaying == null) {
+            Log.d(TAG, "applyPolicyNow skipped (unknown playback state) source=$source")
+            return
+        }
+
+        if (isPlaying) {
+            if (isConversationAwarenessActive) {
+                Log.d(TAG, "applyPolicyNow: skipping active-mode enforcement during CA source=$source")
+                return
+            }
+            val activeMode = getPreferredActiveMode()
+            Log.d(TAG, "applyPolicyNow: enforcing active mode=$activeMode source=$source")
+            setListeningMode(activeMode, "AutoTransparency:apply_play:$source", true)
+        } else {
+            if (pausedManualOverride) {
+                Log.d(TAG, "applyPolicyNow: pausedManualOverride=true -> not enforcing transparency source=$source")
+                return
+            }
+
+            if (immediatePauseEnforce) {
+                Log.d(TAG, "applyPolicyNow: enforcing transparency immediately source=$source")
+                setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:apply_pause:$source", true)
+            } else {
+                schedulePauseEnforceTransparency(source, SystemClock.uptimeMillis())
+            }
         }
     }
 
     fun onListeningModeChanged(newMode: Int, fromAuto: Boolean) {
+        val previousMode = lastKnownListeningMode
         lastKnownListeningMode = newMode
         val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
         if (!enabled) return
@@ -145,7 +225,22 @@ class PlaybackAwareNoiseControlController(
                 }
             }
         } else {
+            val now = SystemClock.uptimeMillis()
+            val withinBaseline = transportBaselineUntilMs?.let { now < it } == true
+            if (withinBaseline) {
+                // During the initial connect churn, AirPods can report their current listening mode
+                // (fromAuto=false) even when the user hasn't changed anything. Only treat changes as
+                // manual overrides if we already had a known mode and it changed.
+                if (previousMode != null && previousMode != newMode) {
+                    Log.d(TAG, "Baseline window: treating paused mode change as manual override ($previousMode -> $newMode)")
+                } else {
+                    Log.d(TAG, "Baseline window: ignoring paused manual override (mode=$newMode)")
+                    return
+                }
+            }
+
             pausedManualOverride = true
+            cancelPendingPauseEnforce("manual override while paused")
             if (forceUiSelection) {
                 val desired = TRANSPARENCY_MODE
                 if (newMode != desired) {
@@ -155,6 +250,47 @@ class PlaybackAwareNoiseControlController(
                 }
             }
         }
+    }
+
+    private fun schedulePauseEnforceTransparency(source: String, now: Long) {
+        val graceMs = PAUSE_ENFORCE_GRACE_MS
+        cancelPendingPauseEnforce("reschedule pause enforce")
+        val enforceAt = now + graceMs
+        pendingPauseEnforceAtMs = enforceAt
+
+        val runnable = Runnable {
+            val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
+            if (!enabled) return@Runnable
+
+            if (lastKnownIsPlaying != false) {
+                Log.d(TAG, "Pause enforce: skipped because playback resumed (source=$source)")
+                return@Runnable
+            }
+
+            if (pausedManualOverride) {
+                Log.d(TAG, "Pause enforce: skipped because pausedManualOverride=true (source=$source)")
+                return@Runnable
+            }
+
+            Log.d(TAG, "Playback paused -> enforcing transparency after grace=${graceMs}ms source=$source")
+            setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:pause:$source", true)
+        }
+
+        pendingPauseEnforceRunnable = runnable
+        handler.postDelayed(runnable, graceMs)
+        Log.d(TAG, "Pause enforce: scheduled in ${graceMs}ms (at=$enforceAt) source=$source")
+    }
+
+    private fun cancelPendingPauseEnforce(reason: String) {
+        pendingPauseEnforceRunnable?.let { handler.removeCallbacks(it) }
+        if (pendingPauseEnforceRunnable != null) {
+            val now = SystemClock.uptimeMillis()
+            val scheduledAt = pendingPauseEnforceAtMs
+            val remainingMs = scheduledAt?.let { (it - now).coerceAtLeast(0L) }
+            Log.d(TAG, "Pause enforce: canceled ($reason) remainingMs=$remainingMs scheduledAtMs=$scheduledAt")
+        }
+        pendingPauseEnforceRunnable = null
+        pendingPauseEnforceAtMs = null
     }
 
     private fun getPreferredActiveMode(): Int {
@@ -205,6 +341,10 @@ class PlaybackAwareNoiseControlController(
 
         // AACP LISTENING_MODE values: 1=Off, 2=ANC, 3=Transparency, 4=Adaptive
         const val TRANSPARENCY_MODE = 3
+
+        // Track-switch micro-pauses are typically very short; keep this low to preserve responsiveness.
+        private const val PAUSE_ENFORCE_GRACE_MS = 150L
+        private const val TRANSPORT_BASELINE_WINDOW_MS = 3000L
 
         private val ACTIVE_MODE_CANDIDATES = setOf(2, 3, 4)
         private const val DEFAULT_ACTIVE_MODE = 4
