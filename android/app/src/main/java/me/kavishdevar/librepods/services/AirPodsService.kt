@@ -603,8 +603,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     PlaybackAwareNoiseControlPrefs.FORCE_UI_SELECTION,
                     false
                 )
-                if (!contains(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE)) putInt(
-                    PlaybackAwareNoiseControlPrefs.ACTIVE_MODE,
+                // UI-selected active mode (preferred over learned when Force UI selection is ON)
+                if (!contains(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_UI)) putInt(
+                    PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_UI,
                     4
                 )
                 if (!contains(PlaybackAwareNoiseControlPrefs.MANUAL_OVERRIDE_TIMEOUT_MS)) putInt(
@@ -1706,6 +1707,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             "disconnect_when_not_wearing" -> config.disconnectWhenNotWearing = preferences.getBoolean(key, false)
             "conversational_awareness_volume" -> config.conversationalAwarenessVolume = preferences.getInt(key, 43)
             "qs_click_behavior" -> config.qsClickBehavior = preferences.getString(key, "cycle") ?: "cycle"
+
+            // Playback‑Aware Noise Control ("Auto Transparency")
+            PlaybackAwareNoiseControlPrefs.ENABLED,
+            PlaybackAwareNoiseControlPrefs.FORCE_UI_SELECTION,
+            PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_UI,
+            PlaybackAwareNoiseControlPrefs.MANUAL_OVERRIDE_TIMEOUT_MS -> {
+                playbackAwareNoiseControlController.onPlaybackAwareSettingsChanged(source = key)
+            }
 
             // AirPods state-based takeover
             "takeover_when_disconnected" -> config.takeoverWhenDisconnected = preferences.getBoolean(key, true)

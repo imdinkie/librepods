@@ -164,7 +164,7 @@ fun AppSettingsScreen(navController: NavController) {
         mutableStateOf(sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.FORCE_UI_SELECTION, false))
     }
     val playbackAwareActiveMode = remember {
-        mutableStateOf(sharedPreferences.getInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE, 4))
+        mutableStateOf(sharedPreferences.getInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_UI, 4))
     }
     val showPlaybackAwareActiveModeDialog = remember { mutableStateOf(false) }
 
@@ -606,7 +606,11 @@ fun AppSettingsScreen(navController: NavController) {
                                         .fillMaxWidth()
                                         .clickable {
                                             playbackAwareActiveMode.value = mode
-                                            sharedPreferences.edit { putInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE, mode) }
+                                            sharedPreferences.edit {
+                                                putInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_UI, mode)
+                                                // Reset any learned mode so the UI choice becomes the baseline.
+                                                remove(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_LEARNED)
+                                            }
                                             showPlaybackAwareActiveModeDialog.value = false
                                         }
                                         .padding(vertical = 10.dp),

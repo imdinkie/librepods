@@ -27,7 +27,19 @@ import androidx.core.content.edit
 object PlaybackAwareNoiseControlPrefs {
     const val ENABLED = "playback_aware_noise_control_enabled"
     const val FORCE_UI_SELECTION = "playback_aware_force_ui_selection"
-    const val ACTIVE_MODE = "playback_aware_active_mode"
+    /**
+     * UI-selected "When Playing" noise control mode.
+     *
+     * This should remain stable even if learning is enabled (Force UI selection OFF).
+     */
+    const val ACTIVE_MODE_UI = "playback_aware_active_mode_ui"
+
+    /**
+     * Learned/override "When Playing" noise control mode (only used when Force UI selection is OFF).
+     * If unset, the controller falls back to [ACTIVE_MODE_UI].
+     */
+    const val ACTIVE_MODE_LEARNED = "playback_aware_active_mode_learned"
+
     const val MANUAL_OVERRIDE_TIMEOUT_MS = "playback_aware_manual_override_timeout_ms"
 }
 
@@ -56,9 +68,14 @@ class PlaybackAwareNoiseControlController(
     private var pendingPauseEnforceRunnable: Runnable? = null
     private var pendingPauseEnforceAtMs: Long? = null
 
+    private var pendingPlayEnforceRunnable: Runnable? = null
+    private var pendingPlayEnforceAtMs: Long? = null
+
     private var pendingRevertRunnable: Runnable? = null
     private var pendingRevertExpectedIsPlaying: Boolean? = null
     private var pendingRevertMode: Int? = null
+
+    private var lastPlayingBecameTrueAtMs: Long? = null
 
     fun onConversationAwarenessActiveChanged(active: Boolean) {
         val wasActive = isConversationAwarenessActive
@@ -88,9 +105,11 @@ class PlaybackAwareNoiseControlController(
         val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
         if (!enabled) {
             lastKnownIsPlaying = isPlaying
+            lastPlayingBecameTrueAtMs = null
             pausedManualOverride = false
             transportBaselineUntilMs = null
             cancelPendingPauseEnforce("disabled")
+            cancelPendingPlayEnforce("disabled")
             cancelPendingRevert("disabled")
             return
         }
@@ -108,6 +127,14 @@ class PlaybackAwareNoiseControlController(
         if (now - lastTransitionAtMs < debounceMs) {
             Log.d(TAG, "Ignoring playback transition due to debounce (${now - lastTransitionAtMs}ms) source=$source isPlaying=$isPlaying")
             lastKnownIsPlaying = isPlaying
+            if (isPlaying) {
+                lastPlayingBecameTrueAtMs = now
+                // Under heavy flapping, we can miss the "play" enforcement and remain in Transparency.
+                // Always schedule a deferred play enforcement if playback is still active.
+                schedulePlayEnforceActiveMode(source = "debounced:$source", now = now)
+            } else {
+                cancelPendingPlayEnforce("debounced pause")
+            }
             return
         }
         lastTransitionAtMs = now
@@ -115,19 +142,22 @@ class PlaybackAwareNoiseControlController(
         if (!isPlaying) {
             // New paused session: allow user override tracking to reset.
             pausedManualOverride = false
+            lastPlayingBecameTrueAtMs = null
         }
         cancelPendingRevert("playback state changed")
 
         if (isPlaying) {
+            lastPlayingBecameTrueAtMs = now
             cancelPendingPauseEnforce("playback resumed")
+            cancelPendingPlayEnforce("playback resumed (reschedule)")
             if (isConversationAwarenessActive) {
                 Log.d(TAG, "Skipping mode enforcement during Conversational Awareness source=$source isPlaying=$isPlaying")
                 return
             }
-            val activeMode = getPreferredActiveMode()
-            Log.d(TAG, "Playback started -> enforcing active mode=$activeMode source=$source")
-            setListeningMode(activeMode, "AutoTransparency:play:$source", true)
+            // Schedule (instead of immediate) so we converge after rapid play/pause flapping.
+            schedulePlayEnforceActiveMode(source = source, now = now)
         } else {
+            cancelPendingPlayEnforce("playback paused")
             // Track switches can produce micro-pauses (empty configs) that should not trigger a mode change.
             // Use a short grace window and cancel if playback resumes quickly.
             schedulePauseEnforceTransparency(source, now)
@@ -144,10 +174,12 @@ class PlaybackAwareNoiseControlController(
         // New session. Clear any previous timers and paused manual override.
         pausedManualOverride = false
         cancelPendingPauseEnforce("transport ready")
+        cancelPendingPlayEnforce("transport ready")
         cancelPendingRevert("transport ready")
 
         // Update our notion of playback state, but apply policy even if the state didn't change.
         lastKnownIsPlaying = isPlaying
+        lastPlayingBecameTrueAtMs = if (isPlaying) now else null
         Log.d(TAG, "Transport ready: baselineWindowMs=$TRANSPORT_BASELINE_WINDOW_MS isPlaying=$isPlaying source=$source")
         applyPolicyNow(source = "transport_ready:$source", immediatePauseEnforce = true)
 
@@ -165,6 +197,12 @@ class PlaybackAwareNoiseControlController(
         )
     }
 
+    fun onPlaybackAwareSettingsChanged(source: String) {
+        // Apply immediately after settings changes so Force UI selection and UI mode updates take effect
+        // without requiring a playback transition.
+        applyPolicyNow(source = "settings_changed:$source", immediatePauseEnforce = true)
+    }
+
     fun applyPolicyNow(source: String, immediatePauseEnforce: Boolean) {
         val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
         if (!enabled) return
@@ -180,7 +218,7 @@ class PlaybackAwareNoiseControlController(
                 Log.d(TAG, "applyPolicyNow: skipping active-mode enforcement during CA source=$source")
                 return
             }
-            val activeMode = getPreferredActiveMode()
+            val activeMode = getActiveModeForPolicy()
             Log.d(TAG, "applyPolicyNow: enforcing active mode=$activeMode source=$source")
             setListeningMode(activeMode, "AutoTransparency:apply_play:$source", true)
         } else {
@@ -212,16 +250,20 @@ class PlaybackAwareNoiseControlController(
 
         if (isPlaying) {
             if (forceUiSelection) {
-                val desired = getPreferredActiveMode()
+                val desired = getActiveModeForPolicy(forceUiSelectionOverride = true)
                 if (newMode != desired) {
                     scheduleRevert(desired, expectedIsPlaying = true, reason = "manual_change_playing")
                 } else {
                     cancelPendingRevert("manual change matches desired (playing)")
                 }
             } else {
-                if (newMode in ACTIVE_MODE_CANDIDATES) {
+                val now = SystemClock.uptimeMillis()
+                cancelPendingPlayEnforce("manual override while playing")
+                if (shouldLearnActiveMode(now) && newMode in ACTIVE_MODE_CANDIDATES) {
                     Log.d(TAG, "Learning active mode from manual change: $newMode")
-                    sharedPreferences.edit { putInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE, newMode) }
+                    sharedPreferences.edit { putInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_LEARNED, newMode) }
+                } else {
+                    Log.d(TAG, "Skipping learning (not stable enough): mode=$newMode")
                 }
             }
         } else {
@@ -259,6 +301,10 @@ class PlaybackAwareNoiseControlController(
         pendingPauseEnforceAtMs = enforceAt
 
         val runnable = Runnable {
+            // Mark runnable as consumed so learning/enforcement logic can proceed.
+            pendingPauseEnforceRunnable = null
+            pendingPauseEnforceAtMs = null
+
             val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
             if (!enabled) return@Runnable
 
@@ -293,9 +339,77 @@ class PlaybackAwareNoiseControlController(
         pendingPauseEnforceAtMs = null
     }
 
-    private fun getPreferredActiveMode(): Int {
-        val mode = sharedPreferences.getInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE, DEFAULT_ACTIVE_MODE)
-        return if (mode in ACTIVE_MODE_CANDIDATES) mode else DEFAULT_ACTIVE_MODE
+    private fun schedulePlayEnforceActiveMode(source: String, now: Long) {
+        cancelPendingPlayEnforce("reschedule play enforce")
+        val enforceAt = now + PLAY_ENFORCE_DELAY_MS
+        pendingPlayEnforceAtMs = enforceAt
+
+        val runnable = Runnable {
+            // Mark runnable as consumed so learning/enforcement logic can proceed.
+            pendingPlayEnforceRunnable = null
+            pendingPlayEnforceAtMs = null
+
+            val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
+            if (!enabled) return@Runnable
+            if (lastKnownIsPlaying != true) {
+                Log.d(TAG, "Play enforce: skipped because playback paused (source=$source)")
+                return@Runnable
+            }
+            if (isConversationAwarenessActive) {
+                Log.d(TAG, "Play enforce: skipped during CA (source=$source)")
+                return@Runnable
+            }
+
+            val activeMode = getActiveModeForPolicy()
+            Log.d(TAG, "Playback playing -> enforcing active mode=$activeMode source=$source")
+            setListeningMode(activeMode, "AutoTransparency:play:$source", true)
+        }
+
+        pendingPlayEnforceRunnable = runnable
+        handler.postDelayed(runnable, PLAY_ENFORCE_DELAY_MS)
+        Log.d(TAG, "Play enforce: scheduled in ${PLAY_ENFORCE_DELAY_MS}ms (at=$enforceAt) source=$source")
+    }
+
+    private fun cancelPendingPlayEnforce(reason: String) {
+        pendingPlayEnforceRunnable?.let { handler.removeCallbacks(it) }
+        if (pendingPlayEnforceRunnable != null) {
+            val now = SystemClock.uptimeMillis()
+            val scheduledAt = pendingPlayEnforceAtMs
+            val remainingMs = scheduledAt?.let { (it - now).coerceAtLeast(0L) }
+            Log.d(TAG, "Play enforce: canceled ($reason) remainingMs=$remainingMs scheduledAtMs=$scheduledAt")
+        }
+        pendingPlayEnforceRunnable = null
+        pendingPlayEnforceAtMs = null
+    }
+
+    private fun getActiveModeForPolicy(forceUiSelectionOverride: Boolean? = null): Int {
+        val forceUiSelection = forceUiSelectionOverride
+            ?: sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.FORCE_UI_SELECTION, false)
+
+        val uiModeRaw = sharedPreferences.getInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_UI, DEFAULT_ACTIVE_MODE)
+        val uiMode = if (uiModeRaw in ACTIVE_MODE_CANDIDATES) uiModeRaw else DEFAULT_ACTIVE_MODE
+
+        if (forceUiSelection) return uiMode
+
+        val learnedModeRaw = if (sharedPreferences.contains(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_LEARNED)) {
+            sharedPreferences.getInt(PlaybackAwareNoiseControlPrefs.ACTIVE_MODE_LEARNED, uiMode)
+        } else {
+            null
+        }
+
+        val learnedMode = learnedModeRaw?.takeIf { it in ACTIVE_MODE_CANDIDATES }
+        return learnedMode ?: uiMode
+    }
+
+    private fun shouldLearnActiveMode(now: Long): Boolean {
+        if (isConversationAwarenessActive) return false
+        if (lastKnownIsPlaying != true) return false
+        if (pendingPauseEnforceRunnable != null) return false
+
+        val playingSince = lastPlayingBecameTrueAtMs ?: return false
+        if (now - playingSince < LEARN_ACTIVE_MODE_MIN_PLAYING_MS) return false
+
+        return true
     }
 
     private fun scheduleRevert(mode: Int, expectedIsPlaying: Boolean, reason: String) {
@@ -343,8 +457,12 @@ class PlaybackAwareNoiseControlController(
         const val TRANSPARENCY_MODE = 3
 
         // Track-switch micro-pauses are typically very short; keep this low to preserve responsiveness.
-        private const val PAUSE_ENFORCE_GRACE_MS = 150L
+        // Buffering pauses (e.g. YouTube during skips) can be longer; use a slightly larger grace window
+        // to avoid spurious switches to Transparency.
+        private const val PAUSE_ENFORCE_GRACE_MS = 500L
+        private const val PLAY_ENFORCE_DELAY_MS = 120L
         private const val TRANSPORT_BASELINE_WINDOW_MS = 3000L
+        private const val LEARN_ACTIVE_MODE_MIN_PLAYING_MS = 500L
 
         private val ACTIVE_MODE_CANDIDATES = setOf(2, 3, 4)
         private const val DEFAULT_ACTIVE_MODE = 4
