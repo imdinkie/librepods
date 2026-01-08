@@ -411,18 +411,22 @@ object MediaController {
     }
 
     @Synchronized
-    fun stopSpeaking() {
+    fun stopSpeaking(resumePlayback: Boolean = true, reason: String = "ca_stop") {
         val isMusicActive = audioManager.isMusicActive
         Log.d(
             "MediaController",
-            "CA speaking stopped: isMusicActive=$isMusicActive pausedByConversationalAwareness=$pausedByConversationalAwareness initialVolume=$initialVolume pauseMusic=$conversationalAwarenessPauseMusic"
+            "CA speaking stopped: isMusicActive=$isMusicActive pausedByConversationalAwareness=$pausedByConversationalAwareness initialVolume=$initialVolume pauseMusic=$conversationalAwarenessPauseMusic resumePlayback=$resumePlayback reason=$reason"
         )
         if (initialVolume != null) {
             smoothVolumeTransition(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC), initialVolume!!)
             if (conversationalAwarenessPauseMusic) {
                 if (pausedByConversationalAwareness) {
-                    Log.d("MediaController", "CA resuming playback (pausedByConversationalAwareness=true)")
-                    sendPlay()
+                    if (resumePlayback) {
+                        Log.d("MediaController", "CA resuming playback (pausedByConversationalAwareness=true)")
+                        sendPlay()
+                    } else {
+                        Log.d("MediaController", "CA not resuming playback (resumePlayback=false)")
+                    }
                 } else {
                     Log.d("MediaController", "CA not resuming playback (pausedByConversationalAwareness=false)")
                 }

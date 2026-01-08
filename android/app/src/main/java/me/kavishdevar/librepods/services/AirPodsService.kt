@@ -1124,7 +1124,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     MediaController.startSpeaking()
                 } else if (conversationAwarenessNotification.status == 8.toByte() || conversationAwarenessNotification.status == 9.toByte()) {
                     playbackAwareNoiseControlController.onConversationAwarenessActiveChanged(false)
-                    MediaController.stopSpeaking()
+                    MediaController.stopSpeaking(resumePlayback = true, reason = "ca_status_${conversationAwarenessNotification.status}")
                 }
 
                 Log.d(
@@ -3277,7 +3277,17 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             "Transport recovery armed: reason=$reason device=$deviceAddress wasMusicActive=$musicActive remoteCloseStreak=$remoteCloseStreak"
         )
         if (musicActive) {
-            remoteCloseBackoffCapNextRecordMs = remoteCloseBackoffUserIntentCapMs
+            // Only cap the *first* remote_eof in a streak to keep recovery responsive without
+            // amplifying repeated connect/disconnect loops.
+            val shouldCap = synchronized(connectAttemptLock) {
+                val sinceLastMs = nowElapsedMs - lastRemoteCloseAtMs
+                val predictedStreak =
+                    if (sinceLastMs in 1..remoteCloseStreakWindowMs) remoteCloseStreak + 1 else 1
+                predictedStreak == 1
+            }
+            if (shouldCap) {
+                remoteCloseBackoffCapNextRecordMs = remoteCloseBackoffUserIntentCapMs
+            }
         }
     }
 
@@ -3679,6 +3689,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         attManager?.disconnect()
                         attManager = null
                         aacpManager.disconnected()
+                        // If we lose the control transport while CA is active, we can miss the CA end packet.
+                        // Reset CA state here so volume/mode doesn't get stuck until the next explicit stop.
+                        playbackAwareNoiseControlController.onConversationAwarenessActiveChanged(false)
+                        MediaController.stopSpeaking(resumePlayback = false, reason = "transport_disconnect:${readLoopReason ?: "readLoopEnded"}")
                         updateNotificationContent(false)
                         sendBroadcast(Intent(AirPodsNotifications.AIRPODS_DISCONNECTED))
                     } else {
