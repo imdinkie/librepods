@@ -330,6 +330,91 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     @Volatile private var remoteCloseBackoffCapNextRecordMs: Long = 0L
 
+    @Volatile private var isConversationalAwarenessActive = false
+    @Volatile private var lastConversationalAwarenessStatus: Byte? = null
+    @Volatile private var lastConversationalAwarenessAtUptimeMs: Long = 0L
+    @Volatile private var caStopWatchdogGeneration: Long = 0L
+    @Volatile private var caStopWatchdogArmedAtUptimeMs: Long = 0L
+    private var caStopWatchdogRunnable: Runnable? = null
+    private val caStopWatchdogDelayMs = 20000L
+
+    private fun cancelConversationalAwarenessStopWatchdog(reason: String) {
+        val runnable = caStopWatchdogRunnable ?: return
+        mainHandler.removeCallbacks(runnable)
+        caStopWatchdogRunnable = null
+        caStopWatchdogArmedAtUptimeMs = 0L
+        caStopWatchdogGeneration += 1L
+        Log.d(TAG, "CA watchdog canceled: reason=$reason")
+    }
+
+    private fun scheduleConversationalAwarenessStopWatchdog(
+        reason: String,
+        delayToFireMs: Long = caStopWatchdogDelayMs,
+        nowUptimeMs: Long = SystemClock.uptimeMillis(),
+    ) {
+        if (!isConversationalAwarenessActive) {
+            Log.d(TAG, "CA watchdog schedule skipped (not active) reason=$reason")
+            return
+        }
+
+        val currentRunnable = caStopWatchdogRunnable
+        if (currentRunnable != null) {
+            mainHandler.removeCallbacks(currentRunnable)
+        }
+
+        val generation = caStopWatchdogGeneration + 1L
+        caStopWatchdogGeneration = generation
+        caStopWatchdogArmedAtUptimeMs = nowUptimeMs
+
+        val armedAt = nowUptimeMs
+        val runnable = Runnable {
+            if (generation != caStopWatchdogGeneration) return@Runnable
+            if (!isConversationalAwarenessActive) return@Runnable
+
+            val now = SystemClock.uptimeMillis()
+            val sinceLastMs = now - lastConversationalAwarenessAtUptimeMs
+            if (sinceLastMs < caStopWatchdogDelayMs) {
+                // We saw more CA activity since arming; re-arm from the most recent activity.
+                val remainingMs = (caStopWatchdogDelayMs - sinceLastMs).coerceAtLeast(1L)
+                Log.d(
+                    TAG,
+                    "CA watchdog stale; re-arming (sinceLastMs=$sinceLastMs remainingMs=$remainingMs armedAt=$armedAt reason=$reason)"
+                )
+                scheduleConversationalAwarenessStopWatchdog(
+                    reason = "rearm:$reason",
+                    delayToFireMs = remainingMs,
+                    nowUptimeMs = now,
+                )
+                return@Runnable
+            }
+
+            val lastStatus = lastConversationalAwarenessStatus?.toString() ?: "null"
+            Log.w(
+                TAG,
+                "CA watchdog fired: forcing local CA end (sinceLastMs=$sinceLastMs lastStatus=$lastStatus armedAt=$armedAt reason=$reason)"
+            )
+            forceEndConversationalAwareness(reason = "watchdog:$reason", resumePlayback = true)
+        }
+
+        caStopWatchdogRunnable = runnable
+        mainHandler.postDelayed(runnable, delayToFireMs)
+        val lastStatus = lastConversationalAwarenessStatus?.toString() ?: "null"
+        Log.d(
+            TAG,
+            "CA watchdog armed: delayMs=$delayToFireMs thresholdMs=$caStopWatchdogDelayMs gen=$generation lastStatus=$lastStatus reason=$reason"
+        )
+    }
+
+    private fun forceEndConversationalAwareness(reason: String, resumePlayback: Boolean) {
+        if (!isConversationalAwarenessActive && lastConversationalAwarenessStatus !in setOf(1.toByte(), 2.toByte(), 3.toByte(), 4.toByte(), 5.toByte(), 6.toByte(), 11.toByte())) {
+            Log.d(TAG, "forceEndCA: already inactive (reason=$reason)")
+        }
+        isConversationalAwarenessActive = false
+        cancelConversationalAwarenessStopWatchdog("force_end:$reason")
+        playbackAwareNoiseControlController.onConversationAwarenessActiveChanged(false)
+        MediaController.stopSpeaking(resumePlayback = resumePlayback, reason = reason)
+    }
+
     private val bleStatusListener = object : BLEManager.AirPodsStatusListener {
         @SuppressLint("NewApi")
         override fun onDeviceStatusChanged(
@@ -760,6 +845,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             )
         )
         MediaController.setPlaybackStateListener { isPlaying ->
+            if (isPlaying && isConversationalAwarenessActive) {
+                Log.d(TAG, "Playback started while CA active -> forcing local CA end")
+                forceEndConversationalAwareness(reason = "user_play_override", resumePlayback = false)
+            }
             playbackAwareNoiseControlController.onPlaybackStateChanged(isPlaying)
         }
 //        Log.d(TAG, "Initializing CrossDevice")
@@ -1119,12 +1208,25 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     putExtra("data", conversationAwarenessNotification.status)
                 })
 
-                if (conversationAwarenessNotification.status == 1.toByte() || conversationAwarenessNotification.status == 2.toByte()) {
+                val status = conversationAwarenessNotification.status
+                val now = SystemClock.uptimeMillis()
+                lastConversationalAwarenessStatus = status
+                lastConversationalAwarenessAtUptimeMs = now
+
+                if (status == 1.toByte() || status == 2.toByte()) {
+                    cancelConversationalAwarenessStopWatchdog("ca_start:$status")
+                    isConversationalAwarenessActive = true
                     playbackAwareNoiseControlController.onConversationAwarenessActiveChanged(true)
                     MediaController.startSpeaking()
-                } else if (conversationAwarenessNotification.status == 8.toByte() || conversationAwarenessNotification.status == 9.toByte()) {
+                } else if (status == 8.toByte() || status == 9.toByte()) {
+                    isConversationalAwarenessActive = false
+                    cancelConversationalAwarenessStopWatchdog("ca_end:$status")
                     playbackAwareNoiseControlController.onConversationAwarenessActiveChanged(false)
-                    MediaController.stopSpeaking(resumePlayback = true, reason = "ca_status_${conversationAwarenessNotification.status}")
+                    MediaController.stopSpeaking(resumePlayback = true, reason = "ca_status_$status")
+                } else if (status == 4.toByte()) {
+                    if (isConversationalAwarenessActive) {
+                        scheduleConversationalAwarenessStopWatchdog(reason = "ca_status_4", nowUptimeMs = now)
+                    }
                 }
 
                 Log.d(
@@ -3691,6 +3793,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         aacpManager.disconnected()
                         // If we lose the control transport while CA is active, we can miss the CA end packet.
                         // Reset CA state here so volume/mode doesn't get stuck until the next explicit stop.
+                        isConversationalAwarenessActive = false
+                        cancelConversationalAwarenessStopWatchdog("transport_disconnect:${readLoopReason ?: "readLoopEnded"}")
                         playbackAwareNoiseControlController.onConversationAwarenessActiveChanged(false)
                         MediaController.stopSpeaking(resumePlayback = false, reason = "transport_disconnect:${readLoopReason ?: "readLoopEnded"}")
                         updateNotificationContent(false)

@@ -89,14 +89,31 @@ class PlaybackAwareNoiseControlController(
             return
         }
 
+        val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
+        if (!enabled || !wasActive) return
+
+        val isPlaying = lastKnownIsPlaying == true
+        val isPaused = lastKnownIsPlaying == false
+        val now = SystemClock.uptimeMillis()
+
+        // If CA ended while playback is active, re-apply the active-mode policy. We may have
+        // skipped play enforcement while CA was active, leaving us stuck in Transparency.
+        if (isPlaying) {
+            Log.d(TAG, "CA ended while playing -> scheduling active-mode enforcement")
+            cancelPendingPauseEnforce("CA ended while playing")
+            schedulePlayEnforceActiveMode(source = "ca_end", now = now)
+            return
+        }
+
         // If CA ended while playback is paused, keep Transparency enforced unless the user
         // explicitly changed modes while paused.
-        val enabled = sharedPreferences.getBoolean(PlaybackAwareNoiseControlPrefs.ENABLED, false)
-        val isPaused = lastKnownIsPlaying == false
-        if (enabled && wasActive && isPaused && !pausedManualOverride) {
+        if (isPaused && !pausedManualOverride) {
             if (lastKnownListeningMode != TRANSPARENCY_MODE) {
                 Log.d(TAG, "CA ended while paused -> re-enforcing transparency")
-                setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:ca_end", true)
+                val ok = setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:ca_end", true)
+                if (!ok) {
+                    Log.w(TAG, "CA end paused enforce failed: mode=$TRANSPARENCY_MODE")
+                }
             }
         }
     }
@@ -220,7 +237,10 @@ class PlaybackAwareNoiseControlController(
             }
             val activeMode = getActiveModeForPolicy()
             Log.d(TAG, "applyPolicyNow: enforcing active mode=$activeMode source=$source")
-            setListeningMode(activeMode, "AutoTransparency:apply_play:$source", true)
+            val ok = setListeningMode(activeMode, "AutoTransparency:apply_play:$source", true)
+            if (!ok) {
+                Log.w(TAG, "applyPolicyNow play enforce failed: mode=$activeMode source=$source")
+            }
         } else {
             if (pausedManualOverride) {
                 Log.d(TAG, "applyPolicyNow: pausedManualOverride=true -> not enforcing transparency source=$source")
@@ -229,7 +249,10 @@ class PlaybackAwareNoiseControlController(
 
             if (immediatePauseEnforce) {
                 Log.d(TAG, "applyPolicyNow: enforcing transparency immediately source=$source")
-                setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:apply_pause:$source", true)
+                val ok = setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:apply_pause:$source", true)
+                if (!ok) {
+                    Log.w(TAG, "applyPolicyNow pause enforce failed: mode=$TRANSPARENCY_MODE source=$source")
+                }
             } else {
                 schedulePauseEnforceTransparency(source, SystemClock.uptimeMillis())
             }
@@ -319,7 +342,10 @@ class PlaybackAwareNoiseControlController(
             }
 
             Log.d(TAG, "Playback paused -> enforcing transparency after grace=${graceMs}ms source=$source")
-            setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:pause:$source", true)
+            val ok = setListeningMode(TRANSPARENCY_MODE, "AutoTransparency:pause:$source", true)
+            if (!ok) {
+                Log.w(TAG, "Pause enforce failed: mode=$TRANSPARENCY_MODE source=$source")
+            }
         }
 
         pendingPauseEnforceRunnable = runnable
@@ -362,7 +388,10 @@ class PlaybackAwareNoiseControlController(
 
             val activeMode = getActiveModeForPolicy()
             Log.d(TAG, "Playback playing -> enforcing active mode=$activeMode source=$source")
-            setListeningMode(activeMode, "AutoTransparency:play:$source", true)
+            val ok = setListeningMode(activeMode, "AutoTransparency:play:$source", true)
+            if (!ok) {
+                Log.w(TAG, "Play enforce failed: mode=$activeMode source=$source")
+            }
         }
 
         pendingPlayEnforceRunnable = runnable
