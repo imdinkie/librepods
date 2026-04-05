@@ -21,6 +21,7 @@
 package me.kavishdevar.librepods.utils
 
 import android.content.SharedPreferences
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.AudioPlaybackConfiguration
 import android.os.Build
@@ -35,12 +36,18 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 
 object MediaController {
     private var initialVolume: Int? = null
+    private var pausedByConversationalAwareness: Boolean = false
     private lateinit var audioManager: AudioManager
     var iPausedTheMedia = false
     var userPlayedTheMedia = false
     private lateinit var sharedPreferences: SharedPreferences
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var preferenceChangeListener: SharedPreferences.OnSharedPreferenceChangeListener
+
+    private var playbackStateListener: ((Boolean) -> Unit)? = null
+    private var lastNotifiedIsMusicActive: Boolean? = null
+    private var lastPlaybackStateNotifyAt: Long = 0L
+    private const val PLAYBACK_STATE_NOTIFY_DEBOUNCE_MS = 500L
 
     var pausedWhileTakingOver = false
     var pausedForOtherDevice = false
@@ -65,6 +72,14 @@ object MediaController {
 
     private var lastPlayWithReplay: Boolean = false
     private var lastPlayTime: Long = 0L
+
+    fun setPlaybackStateListener(listener: ((Boolean) -> Unit)?) {
+        playbackStateListener = listener
+    }
+
+    fun getLastNotifiedPlaybackState(): Boolean? {
+        return lastNotifiedIsMusicActive
+    }
 
     fun initialize(audioManager: AudioManager, sharedPreferences: SharedPreferences) {
         if (this::audioManager.isInitialized) {
@@ -103,6 +118,11 @@ object MediaController {
             val now = SystemClock.uptimeMillis()
             val isActive = audioManager.isMusicActive
             Log.d("MediaController", "Playback config changed, iPausedTheMedia: $iPausedTheMedia, isActive: $isActive, pausedForOtherDevice: $pausedForOtherDevice, lastKnownIsMusicActive: $lastKnownIsMusicActive")
+
+            // audioManager.isMusicActive can stay true even when media is "paused" in some cases.
+            // For playback-aware features, prefer a config-based signal for "playing media".
+            val isLikelyPlayingMedia = isLikelyPlayingMedia(configs, isActive)
+            maybeNotifyPlaybackStateChanged(now, isLikelyPlayingMedia)
 
             if (!isActive && lastPlayWithReplay && now - lastPlayTime < 2500L) {
                 Log.d("MediaController", "Music paused shortly after play with replay; retrying play")
@@ -198,6 +218,55 @@ object MediaController {
 
             lastKnownIsMusicActive = hasNewMusicOrMovie && isActive
         }
+    }
+
+    private fun isLikelyPlayingMedia(
+        configs: List<AudioPlaybackConfiguration>?,
+        isMusicActive: Boolean,
+    ): Boolean {
+        if (!isMusicActive) return false
+        val list = configs ?: return false
+        val result = list.any { config ->
+            val attrs = config.audioAttributes ?: return@any false
+            val isMediaUsage = attrs.usage == AudioAttributes.USAGE_MEDIA
+            val isMusicOrMovie =
+                attrs.contentType == AudioAttributes.CONTENT_TYPE_MUSIC ||
+                    attrs.contentType == AudioAttributes.CONTENT_TYPE_MOVIE
+
+            // AudioPlaybackConfiguration does not expose player state in the public SDK stubs we
+            // compile against, but it *does* include it in toString() (e.g. "state:started").
+            // Use that as a best-effort signal to distinguish "playing" vs "paused".
+            val started = config.toString().contains("state:started")
+
+            started && isMediaUsage && isMusicOrMovie
+        }
+        if (!result && isMusicActive && list.isNotEmpty()) {
+            Log.d("MediaController", "isMusicActive=true but no started media configs detected; treating as paused (configs=${list.size})")
+        }
+        return result
+    }
+
+    private fun maybeNotifyPlaybackStateChanged(now: Long, isPlayingMedia: Boolean) {
+        // Only debounce duplicate state reports; allow fast true transitions (e.g. track switch)
+        // so playback-aware features don't get stuck.
+        if (lastNotifiedIsMusicActive == isPlayingMedia) {
+            if (now - lastPlaybackStateNotifyAt < PLAYBACK_STATE_NOTIFY_DEBOUNCE_MS) {
+                return
+            }
+        }
+        lastPlaybackStateNotifyAt = now
+
+        if (now - lastSelfActionAt < SELF_ACTION_IGNORE_MS) {
+            return
+        }
+
+        if (lastNotifiedIsMusicActive == isPlayingMedia) {
+            return
+        }
+
+        Log.d("MediaController", "Notifying playback state listener: isPlayingMedia=$isPlayingMedia (prev=$lastNotifiedIsMusicActive)")
+        lastNotifiedIsMusicActive = isPlayingMedia
+        playbackStateListener?.invoke(isPlayingMedia)
     }
 
     @Synchronized
@@ -310,7 +379,11 @@ object MediaController {
 
     @Synchronized
     fun startSpeaking() {
-        Log.d("MediaController", "Starting speaking max vol: ${audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)}, current vol: ${audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)}, conversationalAwarenessVolume: $conversationalAwarenessVolume, relativeVolume: $relativeVolume")
+        val isMusicActive = audioManager.isMusicActive
+        Log.d(
+            "MediaController",
+            "CA speaking started: isMusicActive=$isMusicActive pausedByConversationalAwareness=$pausedByConversationalAwareness maxVol=${audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)} currentVol=${audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)} caVol=$conversationalAwarenessVolume relative=$relativeVolume pauseMusic=$conversationalAwarenessPauseMusic"
+        )
 
         if (initialVolume == null) {
             initialVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
@@ -324,21 +397,42 @@ object MediaController {
             }
             smoothVolumeTransition(initialVolume!!, targetVolume)
             if (conversationalAwarenessPauseMusic) {
-                sendPause(force = true)
+                pausedByConversationalAwareness = isMusicActive
+                Log.d(
+                    "MediaController",
+                    "CA pause decision: isMusicActive=$isMusicActive pausedByConversationalAwareness=$pausedByConversationalAwareness"
+                )
+                if (pausedByConversationalAwareness) {
+                    sendPause(force = true)
+                }
             }
         }
         Log.d("MediaController", "Initial Volume: $initialVolume")
     }
 
     @Synchronized
-    fun stopSpeaking() {
-        Log.d("MediaController", "Stopping speaking, initialVolume: $initialVolume")
+    fun stopSpeaking(resumePlayback: Boolean = true, reason: String = "ca_stop") {
+        val isMusicActive = audioManager.isMusicActive
+        Log.d(
+            "MediaController",
+            "CA speaking stopped: isMusicActive=$isMusicActive pausedByConversationalAwareness=$pausedByConversationalAwareness initialVolume=$initialVolume pauseMusic=$conversationalAwarenessPauseMusic resumePlayback=$resumePlayback reason=$reason"
+        )
         if (initialVolume != null) {
             smoothVolumeTransition(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC), initialVolume!!)
             if (conversationalAwarenessPauseMusic) {
-                sendPlay()
+                if (pausedByConversationalAwareness) {
+                    if (resumePlayback) {
+                        Log.d("MediaController", "CA resuming playback (pausedByConversationalAwareness=true)")
+                        sendPlay()
+                    } else {
+                        Log.d("MediaController", "CA not resuming playback (resumePlayback=false)")
+                    }
+                } else {
+                    Log.d("MediaController", "CA not resuming playback (pausedByConversationalAwareness=false)")
+                }
             }
             initialVolume = null
+            pausedByConversationalAwareness = false
         }
     }
 

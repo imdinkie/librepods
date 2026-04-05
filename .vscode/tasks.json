@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Assemble Debug (Android)",
+      "type": "shell",
+      "command": "./gradlew :app:assembleDebug --no-daemon",
+      "options": {
+        "cwd": "${workspaceFolder}/android",
+        "env": {
+          "GRADLE_USER_HOME": "${workspaceFolder}/android/.gradle-home"
+        }
+      },
+      "problemMatcher": [
+        "$gradle"
+      ],
+      "group": "build"
+    },
+    {
+      "label": "Package PrivApp Module (Magisk)",
+      "type": "shell",
+      "command": "bash local-tools/package-privapp-module.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "Assemble Debug (Android)"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}

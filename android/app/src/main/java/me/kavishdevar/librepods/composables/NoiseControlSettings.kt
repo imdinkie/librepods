@@ -51,6 +51,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -91,16 +92,26 @@ fun NoiseControlSettings(
     }?.value?.takeIf { it.isNotEmpty() }?.get(0) == 1.toByte()
     val offListeningMode = remember { mutableStateOf(offListeningModeConfigValue) }
 
-    val offListeningModeListener = object: AACPManager.ControlCommandListener {
-        override fun onControlCommandReceived(controlCommand: AACPManager.ControlCommand) {
-            offListeningMode.value = controlCommand.value[0] == 1.toByte()
+    val offListeningModeListener = remember {
+        object : AACPManager.ControlCommandListener {
+            override fun onControlCommandReceived(controlCommand: AACPManager.ControlCommand) {
+                offListeningMode.value = controlCommand.value[0] == 1.toByte()
+            }
         }
     }
 
-    service.aacpManager.registerControlCommandListener(
-        AACPManager.Companion.ControlCommandIdentifiers.ALLOW_OFF_OPTION,
-        offListeningModeListener
-    )
+    DisposableEffect(service) {
+        service.aacpManager.registerControlCommandListener(
+            AACPManager.Companion.ControlCommandIdentifiers.ALLOW_OFF_OPTION,
+            offListeningModeListener
+        )
+        onDispose {
+            service.aacpManager.unregisterControlCommandListener(
+                AACPManager.Companion.ControlCommandIdentifiers.ALLOW_OFF_OPTION,
+                offListeningModeListener
+            )
+        }
+    }
 
     val isDarkTheme = isSystemInDarkTheme()
     val backgroundColor = if (isDarkTheme) Color(0xFF1C1C1E) else Color(0xFFE3E3E8)
@@ -170,14 +181,26 @@ fun NoiseControlSettings(
         }
     }
 
-    val noiseControlIntentFilter = IntentFilter().apply {
-        addAction(AirPodsNotifications.ANC_DATA)
-        addAction(AirPodsNotifications.DISCONNECT_RECEIVERS)
-    }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        context.registerReceiver(noiseControlReceiver, noiseControlIntentFilter, Context.RECEIVER_EXPORTED)
-    } else {
-        context.registerReceiver(noiseControlReceiver, noiseControlIntentFilter)
+    DisposableEffect(context) {
+        val noiseControlIntentFilter = IntentFilter().apply {
+            addAction(AirPodsNotifications.ANC_DATA)
+            addAction(AirPodsNotifications.DISCONNECT_RECEIVERS)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(
+                noiseControlReceiver,
+                noiseControlIntentFilter,
+                Context.RECEIVER_EXPORTED
+            )
+        } else {
+            context.registerReceiver(noiseControlReceiver, noiseControlIntentFilter)
+        }
+        onDispose {
+            try {
+                context.unregisterReceiver(noiseControlReceiver)
+            } catch (_: Exception) {
+            }
+        }
     }
     Box(
         modifier = Modifier

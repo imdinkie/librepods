@@ -112,9 +112,9 @@ import kotlin.random.Random
 @Composable
 fun HeadTrackingScreen() {
     DisposableEffect(Unit) {
-        ServiceManager.getService()?.startHeadTracking()
+        ServiceManager.getService()?.startHeadTracking("head_tracking_screen")
         onDispose {
-            ServiceManager.getService()?.stopHeadTracking()
+            ServiceManager.getService()?.stopHeadTracking("head_tracking_screen_dispose")
         }
     }
     val isDarkTheme = isSystemInDarkTheme()
@@ -131,10 +131,10 @@ fun HeadTrackingScreen() {
                 StyledIconButton(
                     onClick = {
                         if (ServiceManager.getService()?.isHeadTrackingActive == false) {
-                            ServiceManager.getService()?.startHeadTracking()
+                            ServiceManager.getService()?.startHeadTracking("head_tracking_screen_toggle")
                             Log.d("HeadTrackingScreen", "Head tracking started")
                         } else {
-                            ServiceManager.getService()?.stopHeadTracking()
+                            ServiceManager.getService()?.stopHeadTracking("head_tracking_screen_toggle")
                             Log.d("HeadTrackingScreen", "Head tracking stopped")
                         }
                     },

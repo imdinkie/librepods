@@ -1,0 +1,7 @@
+id=librepods
+name=LibrePods
+version=v0.1.0-rc.4
+versionCode=5
+author=@devnoname120 and @kavishdevar
+description=Installs LibrePods as a system app for granting BLUETOOTH_PRIVILEGED permission for better integraion with android.
+updateJson=https://raw.githubusercontent.com/kavishdevar/librepods/main/update_nonpatch.json

@@ -3,7 +3,8 @@ wak.toml
 log.txt
 btl2capfix.zip
 root-module-manual
-.vscode
+.vscode/*
+!.vscode/tasks.json
 testing.py
 .DS_Store
 CMakeLists.txt.user*
@@ -15,6 +16,24 @@ CMakeLists.txt.user*
 # Gradle files
 .gradle/
 build/
+android/.gradle-home/
+local-tools/*
+!local-tools/build-privapp-module-zip.sh
+!local-tools/package-privapp-module.sh
+!local-tools/librepods-privapp-module/
+!local-tools/librepods-privapp-module/META-INF/
+!local-tools/librepods-privapp-module/META-INF/com/
+!local-tools/librepods-privapp-module/META-INF/com/google/
+!local-tools/librepods-privapp-module/META-INF/com/google/android/
+!local-tools/librepods-privapp-module/META-INF/com/google/android/update-binary
+!local-tools/librepods-privapp-module/META-INF/com/google/android/updater-script
+!local-tools/librepods-privapp-module/module.prop
+!local-tools/librepods-privapp-module/system/
+!local-tools/librepods-privapp-module/system/etc/
+!local-tools/librepods-privapp-module/system/etc/permissions/
+!local-tools/librepods-privapp-module/system/etc/permissions/privapp-permissions-librepods.xml
+local-tools/LibrePods-privapp-module.zip
+local-tools/librepods-privapp-module/system/priv-app/LibrePods/LibrePods.apk
 
 # Local configuration file (sdk path, etc)
 local.properties
@@ -518,6 +537,16 @@ target_wrapper.*
 # QtCreator Qml
 *.qmlproject.user
 *.qmlproject.user.*
+
+# Keep privapp module sources in git while ignoring generated artifacts.
+!local-tools/build-privapp-module-zip.sh
+!local-tools/package-privapp-module.sh
+!local-tools/librepods-privapp-module/META-INF/com/google/android/update-binary
+!local-tools/librepods-privapp-module/META-INF/com/google/android/updater-script
+!local-tools/librepods-privapp-module/module.prop
+!local-tools/librepods-privapp-module/system/etc/permissions/privapp-permissions-librepods.xml
+local-tools/LibrePods-privapp-module.zip
+local-tools/librepods-privapp-module/system/priv-app/LibrePods/LibrePods.apk
 
 # QtCreator CMake
 CMakeLists.txt.user*

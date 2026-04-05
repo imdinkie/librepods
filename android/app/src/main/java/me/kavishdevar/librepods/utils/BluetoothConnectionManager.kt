@@ -34,7 +34,18 @@ object BluetoothConnectionManager {
         Log.d(TAG, "Current connection set to device: ${device.address}")
     }
 
+    fun clearCurrentConnection(reason: String) {
+        val previous = currentDevice?.address
+        currentSocket = null
+        currentDevice = null
+        Log.d(TAG, "Current connection cleared (reason=$reason previous=$previous)")
+    }
+
     fun getCurrentSocket(): BluetoothSocket? {
         return currentSocket
+    }
+
+    fun getCurrentDevice(): BluetoothDevice? {
+        return currentDevice
     }
 }
