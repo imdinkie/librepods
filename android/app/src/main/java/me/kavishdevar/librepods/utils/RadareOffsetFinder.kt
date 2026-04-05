@@ -300,7 +300,11 @@ class RadareOffsetFinder(context: Context) {
             Log.d(TAG, "Extracting ${radare2TarballFile.absolutePath} to $EXTRACT_DIR")
 
             val process = Runtime.getRuntime().exec(
-                arrayOf("su", "-c", "tar xvf ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR")
+                arrayOf(
+                    "su",
+                    "-c",
+                    "tar xvf ${radare2TarballFile.absolutePath} -C $EXTRACT_DIR ./data/local/tmp/aln_unzip"
+                )
             )
 
             val reader = BufferedReader(InputStreamReader(process.inputStream))
@@ -373,7 +377,8 @@ class RadareOffsetFinder(context: Context) {
             for (tarFile in tarFiles) {
                 if (tarFile.endsWith("/")) continue
 
-                val filePathInExtractDir = "$EXTRACT_DIR/$tarFile"
+                val normalizedTarFile = tarFile.removePrefix("./")
+                val filePathInExtractDir = "$EXTRACT_DIR/$normalizedTarFile"
                 val fileCheckProcess = Runtime.getRuntime().exec(
                     arrayOf("su", "-c", "[ -f $filePathInExtractDir ] && echo 'exists'")
                 )
