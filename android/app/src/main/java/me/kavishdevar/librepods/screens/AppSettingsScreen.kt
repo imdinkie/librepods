@@ -855,6 +855,8 @@ fun AppSettingsScreen(navController: NavController) {
                         TextButton(
                             onClick = {
                                 if (RadareOffsetFinder.clearHookOffsets()) {
+                                    context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+                                        .edit { putBoolean("skip_setup", false) }
                                     Toast.makeText(
                                         context,
                                         successText,
