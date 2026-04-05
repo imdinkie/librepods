@@ -29,6 +29,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.appwidget.AppWidgetManager
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
@@ -3099,7 +3100,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     private fun createBluetoothSocket(device: BluetoothDevice, uuid: ParcelUuid): BluetoothSocket {
         val type = 3 // L2CAP
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+            ?: throw IllegalStateException("BluetoothAdapter is unavailable")
         val constructorSpecs = listOf(
+            arrayOf(adapter, device, type, true, true, 0x1001, uuid),
+            arrayOf(adapter, type, true, true, 0x1001, uuid),
+            arrayOf(adapter, device, type, true, true, 0x1001, uuid, false, false),
+            arrayOf(adapter, type, true, true, 0x1001, uuid, false, false),
             arrayOf(device, type, true, true, 0x1001, uuid),
             arrayOf(device, type, 1, true, true, 0x1001, uuid),
             arrayOf(type, 1, true, true, device, 0x1001, uuid),

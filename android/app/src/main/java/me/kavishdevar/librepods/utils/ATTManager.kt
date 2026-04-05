@@ -24,6 +24,7 @@
 package me.kavishdevar.librepods.utils
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import android.os.SystemClock
@@ -298,7 +299,13 @@ class ATTManager(private val device: BluetoothDevice) {
 
     private fun createBluetoothSocket(device: BluetoothDevice, uuid: ParcelUuid): BluetoothSocket {
         val type = 3 // L2CAP
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+            ?: throw IllegalStateException("BluetoothAdapter is unavailable")
         val constructorSpecs = listOf(
+            arrayOf(adapter, device, type, true, true, 31, uuid),
+            arrayOf(adapter, type, true, true, 31, uuid),
+            arrayOf(adapter, device, type, true, true, 31, uuid, false, false),
+            arrayOf(adapter, type, true, true, 31, uuid, false, false),
             arrayOf(device, type, true, true, 31, uuid),
             arrayOf(device, type, 1, true, true, 31, uuid),
             arrayOf(type, 1, true, true, device, 31, uuid),
