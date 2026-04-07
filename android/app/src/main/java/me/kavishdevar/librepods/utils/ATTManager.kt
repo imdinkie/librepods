@@ -68,17 +68,55 @@ class ATTManager(private val device: BluetoothDevice) {
 
         private const val CONNECT_TIMEOUT_MS = 5000L
         private const val RESPONSE_TIMEOUT_MS = 5000L
+
+        private val persistentNotificationCache = mutableMapOf<String, MutableMap<Int, ByteArray>>()
     }
 
     var socket: BluetoothSocket? = null
     private var input: InputStream? = null
     private var output: OutputStream? = null
     private val listeners = mutableMapOf<Int, MutableList<(ByteArray) -> Unit>>()
+    private val notificationCache = mutableMapOf<Int, ByteArray>()
     private var notificationJob: kotlinx.coroutines.Job? = null
 
     // queue for non-notification PDUs (responses to requests)
     private val responses = LinkedBlockingQueue<ByteArray>()
     private val requestLock = Any()
+
+    fun isReady(): Boolean {
+        return socket?.isConnected == true && notificationJob?.isActive == true
+    }
+
+    private fun clearPendingResponses(reason: String) {
+        var cleared = 0
+        while (responses.poll() != null) {
+            cleared += 1
+        }
+        if (cleared > 0) {
+            Log.d(TAG, "Cleared $cleared pending ATT responses (reason=$reason)")
+        }
+    }
+
+    private fun resetSessionState(reason: String) {
+        clearPendingResponses(reason)
+        synchronized(notificationCache) {
+            notificationCache.clear()
+        }
+    }
+
+    private fun updatePersistentNotificationCache(handle: Int, value: ByteArray) {
+        synchronized(persistentNotificationCache) {
+            val deviceCache = persistentNotificationCache.getOrPut(device.address) { mutableMapOf() }
+            deviceCache[handle] = value.copyOf()
+        }
+    }
+
+    private fun cacheAttributeValue(handle: Int, value: ByteArray) {
+        synchronized(notificationCache) {
+            notificationCache[handle] = value.copyOf()
+        }
+        updatePersistentNotificationCache(handle, value)
+    }
 
     private fun connectSocketWithTimeout(socket: BluetoothSocket, timeoutMs: Long): Result<Unit> {
         val error = AtomicReference<Exception?>(null)
@@ -156,10 +194,28 @@ class ATTManager(private val device: BluetoothDevice) {
         return "req=${String.format("%02X", requestOpcode.toInt() and 0xFF)} handle=0x${String.format("%04X", handle)} code=${String.format("%02X", errorCode.toInt() and 0xFF)}"
     }
 
+    private fun closeSession(reason: String, cancelNotificationJob: Boolean) {
+        try {
+            if (cancelNotificationJob) {
+                notificationJob?.cancel()
+            }
+            socket?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error closing ATT session ($reason): ${e.message}")
+        } finally {
+            notificationJob = null
+            socket = null
+            input = null
+            output = null
+            resetSessionState(reason = reason)
+        }
+    }
+
     @SuppressLint("MissingPermission")
     fun connect() {
         HiddenApiBypass.addHiddenApiExemptions("Landroid/bluetooth/BluetoothSocket;")
         val uuid = ParcelUuid.fromString("00000000-0000-0000-0000-000000000000")
+        resetSessionState(reason = "connect_start")
 
         val candidateSocket = createBluetoothSocket(device, uuid)
         Log.d(TAG, "ATT socket.connect: timeoutMs=$CONNECT_TIMEOUT_MS device=${device.address}")
@@ -181,39 +237,51 @@ class ATTManager(private val device: BluetoothDevice) {
         Log.d(TAG, "Connected to ATT: device=${device.address}")
 
         notificationJob = CoroutineScope(Dispatchers.IO).launch {
-            while (socket?.isConnected == true) {
-                try {
-                    val pdu = readPDU()
-                    if (pdu.isNotEmpty() && pdu[0] == OPCODE_HANDLE_VALUE_NTF) {
-                        // notification -> dispatch to listeners
-                        val handle = (pdu[1].toInt() and 0xFF) or ((pdu[2].toInt() and 0xFF) shl 8)
-                        val value = pdu.copyOfRange(3, pdu.size)
-                        listeners[handle]?.forEach { listener ->
-                            try {
-                                listener(value)
-                                Log.d(TAG, "Dispatched notification for handle $handle to listener, with value ${value.joinToString(" ") { String.format("%02X", it) }}")
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Error in listener for handle $handle: ${e.message}")
+            try {
+                while (socket?.isConnected == true) {
+                    try {
+                        val pdu = readPDU()
+                        if (pdu.isNotEmpty() && pdu[0] == OPCODE_HANDLE_VALUE_NTF) {
+                            // notification -> dispatch to listeners
+                            val handle = (pdu[1].toInt() and 0xFF) or ((pdu[2].toInt() and 0xFF) shl 8)
+                            val value = pdu.copyOfRange(3, pdu.size)
+                            cacheAttributeValue(handle, value)
+                            listeners[handle]?.forEach { listener ->
+                                try {
+                                    listener(value)
+                                    Log.d(TAG, "Dispatched notification for handle $handle to listener, with value ${value.joinToString(" ") { String.format("%02X", it) }}")
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Error in listener for handle $handle: ${e.message}")
+                                }
                             }
+                        } else {
+                            // not a notification -> treat as a response for pending request(s)
+                            responses.put(pdu)
                         }
-                    } else {
-                        // not a notification -> treat as a response for pending request(s)
-                        responses.put(pdu)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error reading notification/response: ${e.message}")
+                        break
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error reading notification/response: ${e.message}")
-                    if (socket?.isConnected != true) break
                 }
+            } finally {
+                closeSession(reason = "listener_exit", cancelNotificationJob = false)
             }
         }
     }
 
     fun disconnect() {
-        try {
-            notificationJob?.cancel()
-            socket?.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error closing socket: ${e.message}")
+        closeSession(reason = "disconnect", cancelNotificationJob = true)
+    }
+
+    fun getCachedNotificationValue(handle: ATTHandles): ByteArray? {
+        return synchronized(notificationCache) {
+            notificationCache[handle.value]?.copyOf()
+        }
+    }
+
+    fun getLastKnownNotificationValue(handle: ATTHandles): ByteArray? {
+        return synchronized(persistentNotificationCache) {
+            persistentNotificationCache[device.address]?.get(handle.value)?.copyOf()
         }
     }
 
@@ -229,22 +297,32 @@ class ATTManager(private val device: BluetoothDevice) {
         write(ATTCCCDHandles.valueOf(handle.name), byteArrayOf(0x01, 0x00))
     }
 
-    fun read(handle: ATTHandles): ByteArray {
+    fun read(handle: ATTHandles, timeoutMs: Long = RESPONSE_TIMEOUT_MS): ByteArray {
+        if (!isReady()) {
+            throw IllegalStateException("ATT session is not ready")
+        }
         synchronized(requestLock) {
+            clearPendingResponses(reason = "read:${handle.name}")
             val lsb = (handle.value and 0xFF).toByte()
             val msb = ((handle.value shr 8) and 0xFF).toByte()
             val pdu = byteArrayOf(OPCODE_READ_REQUEST, lsb, msb)
             writeRaw(pdu)
-            val resp = waitForResponse(OPCODE_READ_RESPONSE)
+            val resp = waitForResponse(OPCODE_READ_RESPONSE, timeoutMs = timeoutMs)
             if (resp[0] == OPCODE_ERROR_RESPONSE) {
                 throw IllegalStateException("ATT read error: ${formatErrorResponse(resp)}")
             }
-            return resp.copyOfRange(1, resp.size)
+            val value = resp.copyOfRange(1, resp.size)
+            cacheAttributeValue(handle.value, value)
+            return value
         }
     }
 
-    fun write(handle: ATTHandles, value: ByteArray) {
+    fun write(handle: ATTHandles, value: ByteArray): Boolean {
+        if (!isReady()) {
+            throw IllegalStateException("ATT session is not ready")
+        }
         synchronized(requestLock) {
+            clearPendingResponses(reason = "write:${handle.name}")
             val lsb = (handle.value and 0xFF).toByte()
             val msb = ((handle.value shr 8) and 0xFF).toByte()
             val pdu = byteArrayOf(OPCODE_WRITE_REQUEST, lsb, msb) + value
@@ -253,15 +331,22 @@ class ATTManager(private val device: BluetoothDevice) {
                 val resp = waitForResponse(OPCODE_WRITE_RESPONSE)
                 if (resp[0] == OPCODE_ERROR_RESPONSE) {
                     Log.w(TAG, "ATT write error: ${formatErrorResponse(resp)}")
+                    return false
                 }
+                return true
             } catch (e: Exception) {
                 Log.w(TAG, "No write response received: ${e.message}")
+                return false
             }
         }
     }
 
     fun write(handle: ATTCCCDHandles, value: ByteArray) {
+        if (!isReady()) {
+            throw IllegalStateException("ATT session is not ready")
+        }
         synchronized(requestLock) {
+            clearPendingResponses(reason = "write_cccd:${handle.name}")
             val lsb = (handle.value and 0xFF).toByte()
             val msb = ((handle.value shr 8) and 0xFF).toByte()
             val pdu = byteArrayOf(OPCODE_WRITE_REQUEST, lsb, msb) + value

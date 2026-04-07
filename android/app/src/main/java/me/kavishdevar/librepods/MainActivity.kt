@@ -171,8 +171,10 @@ class MainActivity : ComponentActivity() {
             Log.e("MainActivity", "Error while unbinding service: $e")
         }
         try {
-            unregisterReceiver(connectionStatusReceiver)
-            Log.d("MainActivity", "Unregistered receiver")
+            if (::connectionStatusReceiver.isInitialized) {
+                unregisterReceiver(connectionStatusReceiver)
+                Log.d("MainActivity", "Unregistered receiver")
+            }
         } catch (e: Exception) {
             Log.e("MainActivity", "Error while unregistering receiver: $e")
         }
@@ -188,8 +190,10 @@ class MainActivity : ComponentActivity() {
             Log.e("MainActivity", "Error while unbinding service: $e")
         }
         try {
-            unregisterReceiver(connectionStatusReceiver)
-            Log.d("MainActivity", "Unregistered receiver")
+            if (::connectionStatusReceiver.isInitialized) {
+                unregisterReceiver(connectionStatusReceiver)
+                Log.d("MainActivity", "Unregistered receiver")
+            }
         } catch (e: Exception) {
             Log.e("MainActivity", "Error while unregistering receiver: $e")
         }

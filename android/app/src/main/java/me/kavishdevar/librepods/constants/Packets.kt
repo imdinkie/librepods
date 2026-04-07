@@ -151,6 +151,25 @@ class AirPodsNotifications {
         private var second: Battery = Battery(BatteryComponent.RIGHT, 0, BatteryStatus.DISCONNECTED)
         private var case: Battery = Battery(BatteryComponent.CASE, 0, BatteryStatus.DISCONNECTED)
 
+        private fun mergeComponent(
+            current: Battery,
+            component: Int,
+            level: Int?,
+            charging: Boolean?
+        ): Battery {
+            var merged = current
+            if (level != null) {
+                merged = merged.copy(component = component, level = level)
+            }
+            if (charging != null) {
+                merged = merged.copy(
+                    component = component,
+                    status = if (charging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING
+                )
+            }
+            return merged
+        }
+
         fun isBatteryData(data: ByteArray): Boolean {
             if (data.joinToString("") { "%02x".format(it) }.startsWith("040004000400")) {
                 Log.d("BatteryNotification", "Battery data starts with 040004000400. Most likely is a battery packet.")
@@ -176,6 +195,25 @@ class AirPodsNotifications {
             first = Battery(BatteryComponent.LEFT, leftLevel, if (leftCharging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING)
             second = Battery(BatteryComponent.RIGHT, rightLevel, if (rightCharging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING)
             case = Battery(BatteryComponent.CASE, caseLevel, if (caseCharging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING)
+        }
+
+        fun mergeBatteryDirect(
+            leftLevel: Int? = null,
+            leftCharging: Boolean? = null,
+            rightLevel: Int? = null,
+            rightCharging: Boolean? = null,
+            caseLevel: Int? = null,
+            caseCharging: Boolean? = null
+        ): Boolean {
+            val oldFirst = first
+            val oldSecond = second
+            val oldCase = case
+
+            first = mergeComponent(first, BatteryComponent.LEFT, leftLevel, leftCharging)
+            second = mergeComponent(second, BatteryComponent.RIGHT, rightLevel, rightCharging)
+            case = mergeComponent(case, BatteryComponent.CASE, caseLevel, caseCharging)
+
+            return first != oldFirst || second != oldSecond || case != oldCase
         }
 
         fun setBattery(data: ByteArray) {
@@ -207,6 +245,16 @@ class AirPodsNotifications {
             case = Battery(
                 data[17].toInt(), data[19].toInt(), data[20].toInt()
             )
+        }
+
+        fun setBatterySnapshot(
+            left: Battery,
+            right: Battery,
+            caseBattery: Battery
+        ) {
+            first = left
+            second = right
+            case = caseBattery
         }
 
         fun getBattery(): List<Battery> {

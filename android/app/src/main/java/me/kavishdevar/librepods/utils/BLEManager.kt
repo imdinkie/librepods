@@ -63,6 +63,29 @@ class BLEManager(private val context: Context) {
         return deviceStatusMap.values.maxByOrNull { it.lastSeen }
     }
 
+    fun getMergedStatus(): AirPodsStatus? {
+        val statuses = deviceStatusMap.values
+            .sortedByDescending { it.lastSeen }
+        val newest = statuses.firstOrNull() ?: return null
+
+        fun firstWithLevel(levelSelector: (AirPodsStatus) -> Int?): AirPodsStatus? {
+            return statuses.firstOrNull { levelSelector(it) != null }
+        }
+
+        val leftSource = firstWithLevel { it.leftBattery }
+        val rightSource = firstWithLevel { it.rightBattery }
+        val caseSource = firstWithLevel { it.caseBattery }
+
+        return newest.copy(
+            leftBattery = leftSource?.leftBattery,
+            rightBattery = rightSource?.rightBattery,
+            caseBattery = caseSource?.caseBattery,
+            isLeftCharging = leftSource?.isLeftCharging ?: newest.isLeftCharging,
+            isRightCharging = rightSource?.isRightCharging ?: newest.isRightCharging,
+            isCaseCharging = caseSource?.isCaseCharging ?: newest.isCaseCharging
+        )
+    }
+
     interface AirPodsStatusListener {
         fun onDeviceStatusChanged(device: AirPodsStatus, previousStatus: AirPodsStatus?)
         fun onBroadcastFromNewAddress(device: AirPodsStatus)

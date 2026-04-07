@@ -43,8 +43,10 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +65,9 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.services.ServiceManager
 import me.kavishdevar.librepods.utils.AACPManager
 import me.kavishdevar.librepods.utils.ATTHandles
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.io.encoding.ExperimentalEncodingApi
 
 @Composable
@@ -472,17 +477,13 @@ fun StyledToggle(
     val attManager = ServiceManager.getService()?.attManager ?: return
     val isDarkTheme = isSystemInDarkTheme()
     val textColor = if (isDarkTheme) Color.White else Color.Black
-    val checkedValue = try {
-        attManager.read(attHandle).getOrNull(0)?.toInt()
-    } catch (e: Exception) {
-        Log.w("StyledToggle", "Error reading initial value for $label: ${e.message}")
-        null
-    } ?: 0
-    var checked by remember { mutableStateOf(checkedValue !=0) }
+    val scope = rememberCoroutineScope()
+    var checked by remember(attManager, attHandle) { mutableStateOf(false) }
+    val initialLoadComplete = remember(attManager, attHandle) { mutableStateOf(false) }
+    val deviceApplyVersion = remember(attManager, attHandle) { mutableIntStateOf(0) }
+    val lastSkippedDeviceApplyVersion = remember(attManager, attHandle) { mutableIntStateOf(0) }
     var backgroundColor by remember { mutableStateOf(if (isDarkTheme) Color(0xFF1C1C1E) else Color(0xFFFFFFFF)) }
     val animatedBackgroundColor by animateColorAsState(targetValue = backgroundColor, animationSpec = tween(durationMillis = 500))
-
-    attManager.enableNotifications(attHandle)
 
     if (sharedPreferenceKey != null && sharedPreferences != null) {
         checked = sharedPreferences.getBoolean(sharedPreferenceKey, checked)
@@ -499,29 +500,63 @@ fun StyledToggle(
         onCheckedChange?.invoke(checked)
     }
 
-    LaunchedEffect(checked) {
-        if (attManager.socket?.isConnected != true) return@LaunchedEffect
-        attManager.write(attHandle, if (checked) byteArrayOf(1) else byteArrayOf(0))
-    }
-
-    val listener = remember {
+    val listener = remember(attManager, attHandle) {
         object : (ByteArray) -> Unit {
             override fun invoke(value: ByteArray) {
-                if (value.isNotEmpty()) {
-                    checked = value[0].toInt() != 0
-                    Log.d("StyledToggle", "Updated from notification for $label: enabled=$checked")
-                } else {
-                    Log.w("StyledToggle", "Empty value in notification for $label")
+                scope.launch {
+                    if (value.isNotEmpty()) {
+                        deviceApplyVersion.intValue += 1
+                        checked = value[0].toInt() != 0
+                        Log.d("StyledToggle", "Updated from notification for $label: enabled=$checked")
+                    } else {
+                        Log.w("StyledToggle", "Empty value in notification for $label")
+                    }
                 }
             }
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(attManager, attHandle) {
         attManager.registerListener(attHandle, listener)
+        try {
+            withContext(Dispatchers.IO) {
+                attManager.enableNotifications(attHandle)
+            }
+
+            val cachedValue = attManager.getCachedNotificationValue(attHandle)
+            if (cachedValue != null && cachedValue.isNotEmpty()) {
+                deviceApplyVersion.intValue += 1
+                checked = cachedValue[0].toInt() != 0
+            } else {
+                val initialValue = try {
+                    withContext(Dispatchers.IO) {
+                        attManager.read(attHandle).getOrNull(0)?.toInt()
+                    }
+                } catch (e: Exception) {
+                    Log.w("StyledToggle", "Error reading initial value for $label: ${e.message}")
+                    null
+                } ?: 0
+                deviceApplyVersion.intValue += 1
+                checked = initialValue != 0
+            }
+        } finally {
+            initialLoadComplete.value = true
+        }
     }
 
-    DisposableEffect(Unit) {
+    LaunchedEffect(checked, initialLoadComplete.value) {
+        if (!initialLoadComplete.value) return@LaunchedEffect
+        if (deviceApplyVersion.intValue != lastSkippedDeviceApplyVersion.intValue) {
+            lastSkippedDeviceApplyVersion.intValue = deviceApplyVersion.intValue
+            return@LaunchedEffect
+        }
+        if (!attManager.isReady()) return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            attManager.write(attHandle, if (checked) byteArrayOf(1) else byteArrayOf(0))
+        }
+    }
+
+    DisposableEffect(attManager, attHandle) {
         onDispose {
             attManager.unregisterListener(attHandle, listener)
         }
