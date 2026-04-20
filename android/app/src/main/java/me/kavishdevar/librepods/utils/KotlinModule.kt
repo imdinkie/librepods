@@ -3,9 +3,9 @@ package me.kavishdevar.librepods.utils
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ApplicationInfo
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.ParcelUuid
 import android.util.Log
@@ -19,21 +19,18 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import androidx.core.net.toUri
-import io.github.libxposed.api.XposedInterface
-import io.github.libxposed.api.XposedInterface.AfterHookCallback
+import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
-import io.github.libxposed.api.annotations.AfterInvocation
-import io.github.libxposed.api.annotations.XposedHooker
+import java.util.function.Consumer
 
 private const val TAG = "AirPodsHook"
-private lateinit var module: KotlinModule
 @SuppressLint("DiscouragedApi", "PrivateApi")
-class KotlinModule(base: XposedInterface, param: ModuleLoadedParam): XposedModule(base, param) {
-    init {
+class KotlinModule : XposedModule() {
+    override fun onModuleLoaded(param: ModuleLoadedParam) {
+        super.onModuleLoaded(param)
         Log.i(TAG, "AirPodsHook module initialized at :: ${param.processName}")
-        module = this
     }
 
     override fun onPackageLoaded(param: XposedModuleInterface.PackageLoadedParam) {
@@ -57,27 +54,25 @@ class KotlinModule(base: XposedInterface, param: ModuleLoadedParam): XposedModul
         if (param.packageName == "com.google.android.settings") {
             Log.i(TAG, "Settings app detected, hooking Bluetooth icon handling")
             try {
-                val headerControllerClass = param.classLoader.loadClass(
+                val headerControllerClass = param.defaultClassLoader.loadClass(
                     "com.google.android.settings.bluetooth.AdvancedBluetoothDetailsHeaderController")
 
-                val updateIconMethod = headerControllerClass.getDeclaredMethod(
-                    "updateIcon",
-                    ImageView::class.java,
-                    String::class.java)
-
-                hook(updateIconMethod, BluetoothIconHooker::class.java)
-                Log.i(TAG, "Successfully hooked updateIcon method in Bluetooth settings")
-
                 try {
-                    val displayPreferenceMethod = headerControllerClass.getDeclaredMethod(
-                        "displayPreference",
-                        param.classLoader.loadClass("androidx.preference.PreferenceScreen"))
+                    val loadIconMethod = headerControllerClass.getDeclaredMethod(
+                        "loadIcon",
+                        Int::class.javaPrimitiveType,
+                        String::class.java,
+                        Consumer::class.java)
 
-                    hook(displayPreferenceMethod, BluetoothSettingsAirPodsHooker::class.java)
-                    Log.i(TAG, "Successfully hooked displayPreference for AirPods button injection")
+                    hook(loadIconMethod).intercept { chain ->
+                        BluetoothIconHooker.afterLoadIcon(chain)
+                    }
+                    Log.i(TAG, "Successfully hooked loadIcon method in Bluetooth settings")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to hook displayPreference: ${e.message}", e)
+                    Log.e(TAG, "Failed to hook loadIcon: ${e.message}", e)
                 }
+
+                hookDisplayPreference(headerControllerClass, param.defaultClassLoader)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to hook Bluetooth icon handler: ${e.message}", e)
             }
@@ -86,186 +81,229 @@ class KotlinModule(base: XposedInterface, param: ModuleLoadedParam): XposedModul
         if (param.packageName == "com.android.settings") {
             Log.i(TAG, "Settings app detected, hooking Bluetooth icon handling")
             try {
-                val headerControllerClass = param.classLoader.loadClass(
+                val headerControllerClass = param.defaultClassLoader.loadClass(
                     "com.android.settings.bluetooth.AdvancedBluetoothDetailsHeaderController")
 
-                val updateIconMethod = headerControllerClass.getDeclaredMethod(
-                    "updateIcon",
-                    ImageView::class.java,
-                    String::class.java)
-
-                hook(updateIconMethod, BluetoothIconHooker::class.java)
-                Log.i(TAG, "Successfully hooked updateIcon method in Bluetooth settings")
-
                 try {
-                    val displayPreferenceMethod = headerControllerClass.getDeclaredMethod(
-                        "displayPreference",
-                        param.classLoader.loadClass("androidx.preference.PreferenceScreen"))
+                    val loadIconMethod = headerControllerClass.getDeclaredMethod(
+                        "loadIcon",
+                        Int::class.javaPrimitiveType,
+                        String::class.java,
+                        Consumer::class.java)
 
-                    hook(displayPreferenceMethod, BluetoothSettingsAirPodsHooker::class.java)
-                    Log.i(TAG, "Successfully hooked displayPreference for AirPods button injection")
+                    hook(loadIconMethod).intercept { chain ->
+                        BluetoothIconHooker.afterLoadIcon(chain)
+                    }
+                    Log.i(TAG, "Successfully hooked loadIcon method in Bluetooth settings")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to hook displayPreference: ${e.message}", e)
+                    Log.e(TAG, "Failed to hook loadIcon: ${e.message}", e)
                 }
+
+                hookDisplayPreference(headerControllerClass, param.defaultClassLoader)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to hook Bluetooth icon handler: ${e.message}", e)
             }
         }
     }
 
-    @XposedHooker
-    class BluetoothSettingsAirPodsHooker : XposedInterface.Hooker {
-        companion object {
-            private const val AIRPODS_UUID = "74ec2172-0bad-4d01-8f77-997b2be0722a"
-            private const val LIBREPODS_PREFERENCE_KEY = "librepods_open_preference"
-            private const val ACTION_SET_ANC_MODE = "me.kavishdevar.librepods.SET_ANC_MODE"
-            private const val EXTRA_ANC_MODE = "anc_mode"
+    private fun hookDisplayPreference(headerControllerClass: Class<*>, classLoader: ClassLoader) {
+        try {
+            val displayPreferenceMethod = headerControllerClass.getDeclaredMethod(
+                "displayPreference",
+                classLoader.loadClass("androidx.preference.PreferenceScreen"))
 
-            private const val ANC_MODE_OFF = 1
-            private const val ANC_MODE_NOISE_CANCELLATION = 2
-            private const val ANC_MODE_TRANSPARENCY = 3
-            private const val ANC_MODE_ADAPTIVE = 4
-
-            private var currentAncMode = ANC_MODE_NOISE_CANCELLATION
-
-            @JvmStatic
-            @AfterInvocation
-            fun afterDisplayPreference(callback: AfterHookCallback) {
-                try {
-                    val controller = callback.thisObject!!
-                    val preferenceScreen = callback.args[0]!!
-
-                    val context = preferenceScreen.javaClass.getMethod("getContext").invoke(preferenceScreen) as Context
-
-                    val deviceField = controller.javaClass.getDeclaredField("mCachedDevice")
-                    deviceField.isAccessible = true
-                    val cachedDevice = deviceField.get(controller) ?: return
-
-                    val getDeviceMethod = cachedDevice.javaClass.getMethod("getDevice")
-                    val bluetoothDevice = getDeviceMethod.invoke(cachedDevice) ?: return
-
-                    val uuidsMethod = bluetoothDevice.javaClass.getMethod("getUuids")
-                    val uuids = uuidsMethod.invoke(bluetoothDevice) as? Array<ParcelUuid>
-
-                    if (uuids != null) {
-                        val isAirPods = uuids.any { it.uuid.toString() == AIRPODS_UUID }
-
-                        if (isAirPods) {
-                            Log.i(TAG, "AirPods device detected in settings, injecting controls")
-
-                            val findPreferenceMethod = preferenceScreen.javaClass.getMethod("findPreference", CharSequence::class.java)
-                            val existingPref = findPreferenceMethod.invoke(preferenceScreen, LIBREPODS_PREFERENCE_KEY)
-
-                            if (existingPref != null) {
-                                Log.i(TAG, "LIBREPODS button already exists, skipping")
-                                return
-                            }
-
-                            val preferenceClass = preferenceScreen.javaClass.classLoader.loadClass("androidx.preference.Preference")
-                            val preference = preferenceClass.getConstructor(Context::class.java).newInstance(context)
-
-                            val setKeyMethod = preferenceClass.getMethod("setKey", String::class.java)
-                            setKeyMethod.invoke(preference, LIBREPODS_PREFERENCE_KEY)
-
-                            val setTitleMethod = preferenceClass.getMethod("setTitle", CharSequence::class.java)
-                            setTitleMethod.invoke(preference, "Open LibrePods")
-
-                            val setSummaryMethod = preferenceClass.getMethod("setSummary", CharSequence::class.java)
-                            setSummaryMethod.invoke(preference, "Control AirPods features")
-
-                            val setIconMethod = preferenceClass.getMethod("setIcon", Int::class.java)
-                            setIconMethod.invoke(preference, android.R.drawable.ic_menu_manage)
-
-                            val setOrderMethod = preferenceClass.getMethod("setOrder", Int::class.java)
-                            setOrderMethod.invoke(preference, 1000)
-
-                            val intent = Intent().apply {
-                                setClassName("me.kavishdevar.librepods", "me.kavishdevar.librepods.MainActivity")
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                            }
-                            val setIntentMethod = preferenceClass.getMethod("setIntent", Intent::class.java)
-                            setIntentMethod.invoke(preference, intent)
-
-                            val addPreferenceMethod = preferenceScreen.javaClass.getMethod("addPreference", preferenceClass)
-                            addPreferenceMethod.invoke(preferenceScreen, preference)
-
-                            Log.i(TAG, "Successfully added Open LIBREPODS button to AirPods settings")
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error in BluetoothSettingsAirPodsHooker: ${e.message}", e)
-                    e.printStackTrace()
-                }
+            hook(displayPreferenceMethod).intercept { chain ->
+                BluetoothSettingsAirPodsHooker.afterDisplayPreference(chain)
             }
+            Log.i(TAG, "Successfully hooked displayPreference for AirPods button injection")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to hook displayPreference: ${e.message}", e)
         }
     }
 
-    @XposedHooker
-    class BluetoothIconHooker : XposedInterface.Hooker {
-        companion object {
-            @JvmStatic
-            @AfterInvocation
-            fun afterUpdateIcon(callback: AfterHookCallback) {
-                Log.i(TAG, "BluetoothIconHooker called with args: ${callback.args.joinToString(", ")}")
+    object BluetoothSettingsAirPodsHooker {
+        private const val AIRPODS_UUID = "74ec2172-0bad-4d01-8f77-997b2be0722a"
+        private const val LIBREPODS_PREFERENCE_KEY = "librepods_open_preference"
+
+        fun afterDisplayPreference(chain: Chain): Any? {
+            val result = chain.proceed()
+            try {
+                val controller = chain.thisObject!!
+                val preferenceScreen = chain.getArg(0)
+
+                val context = preferenceScreen.javaClass.getMethod("getContext").invoke(preferenceScreen) as Context
+
+                val deviceField = controller.javaClass.getDeclaredField("mCachedDevice")
+                deviceField.isAccessible = true
+                val cachedDevice = deviceField.get(controller) ?: return result
+
+                val getDeviceMethod = cachedDevice.javaClass.getMethod("getDevice")
+                val bluetoothDevice = getDeviceMethod.invoke(cachedDevice) ?: return result
+
+                val uuidsMethod = bluetoothDevice.javaClass.getMethod("getUuids")
+                val uuids = uuidsMethod.invoke(bluetoothDevice) as? Array<ParcelUuid>
+
+                if (uuids != null) {
+                    val isAirPods = uuids.any { it.uuid.toString() == AIRPODS_UUID }
+
+                    if (isAirPods) {
+                        Log.i(TAG, "AirPods device detected in settings, injecting controls")
+
+                        val findPreferenceMethod = preferenceScreen.javaClass.getMethod("findPreference", CharSequence::class.java)
+                        val existingPref = findPreferenceMethod.invoke(preferenceScreen, LIBREPODS_PREFERENCE_KEY)
+
+                        if (existingPref != null) {
+                            Log.i(TAG, "LIBREPODS button already exists, skipping")
+                            return result
+                        }
+
+                        val preferenceClass = preferenceScreen.javaClass.classLoader.loadClass("androidx.preference.Preference")
+                        val preference = preferenceClass.getConstructor(Context::class.java).newInstance(context)
+
+                        val setKeyMethod = preferenceClass.getMethod("setKey", String::class.java)
+                        setKeyMethod.invoke(preference, LIBREPODS_PREFERENCE_KEY)
+
+                        val setTitleMethod = preferenceClass.getMethod("setTitle", CharSequence::class.java)
+                        setTitleMethod.invoke(preference, "Open LibrePods")
+
+                        val setSummaryMethod = preferenceClass.getMethod("setSummary", CharSequence::class.java)
+                        setSummaryMethod.invoke(preference, "Control AirPods features")
+
+                        val setIconMethod = preferenceClass.getMethod("setIcon", Int::class.java)
+                        setIconMethod.invoke(preference, android.R.drawable.ic_menu_manage)
+
+                        val setOrderMethod = preferenceClass.getMethod("setOrder", Int::class.java)
+                        setOrderMethod.invoke(preference, 1000)
+
+                        val intent = Intent().apply {
+                            setClassName("me.kavishdevar.librepods", "me.kavishdevar.librepods.MainActivity")
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        val setIntentMethod = preferenceClass.getMethod("setIntent", Intent::class.java)
+                        setIntentMethod.invoke(preference, intent)
+
+                        val addPreferenceMethod = preferenceScreen.javaClass.getMethod("addPreference", preferenceClass)
+                        addPreferenceMethod.invoke(preferenceScreen, preference)
+
+                        Log.i(TAG, "Successfully added Open LIBREPODS button to AirPods settings")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in BluetoothSettingsAirPodsHooker: ${e.message}", e)
+                e.printStackTrace()
+            }
+            return result
+        }
+    }
+
+    object BluetoothIconHooker {
+        fun afterLoadIcon(chain: Chain): Any? {
+            val iconUri = chain.getArg(1) as? String
+            if (!iconUri.isNullOrBlank() && iconUri.startsWith("android.resource://me.kavishdevar.librepods")) {
                 try {
-                    val imageView = callback.args[0] as ImageView
-                    val iconUri = callback.args[1] as String
-
+                    val context = findContext(chain.thisObject)
                     val uri = iconUri.toUri()
-                    if (uri.toString().startsWith("android.resource://me.kavishdevar.librepods")) {
-                        Log.i(TAG, "Handling AirPods icon URI: $uri")
+                    val packageName = uri.authority ?: return chain.proceed()
+                    val packageContext = context.createPackageContext(
+                        packageName,
+                        Context.CONTEXT_IGNORE_SECURITY
+                    )
 
-                        try {
-                            val context = imageView.context
+                    val resPath = uri.pathSegments
+                    if (resPath.size >= 2 && resPath[0] == "drawable") {
+                        val resourceName = resPath[1]
+                        val resourceId = packageContext.resources.getIdentifier(
+                            resourceName, "drawable", packageName
+                        )
 
-                            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                try {
-                                    val packageName = uri.authority
-                                    val packageContext = context.createPackageContext(
-                                        packageName,
-                                        Context.CONTEXT_IGNORE_SECURITY
+                        if (resourceId != 0) {
+                            val drawable = packageContext.resources.getDrawable(
+                                resourceId, packageContext.theme
+                            )
+                            @Suppress("UNCHECKED_CAST")
+                            val consumer = chain.getArg(2) as Consumer<Drawable>
+                            consumer.accept(drawable)
+                            Log.i(TAG, "Handled AirPods icon URI via loadIcon: $resourceName")
+                            return null
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in BluetoothIconHooker.loadIcon: ${e.message}", e)
+                }
+            }
+            return chain.proceed()
+        }
+
+        fun afterUpdateIcon(chain: Chain): Any? {
+            val result = chain.proceed()
+            Log.i(TAG, "BluetoothIconHooker called with args: ${chain.args.joinToString(", ")}")
+            try {
+                val imageView = chain.getArg(0) as ImageView
+                val iconUri = chain.getArg(1) as String
+
+                val uri = iconUri.toUri()
+                if (uri.toString().startsWith("android.resource://me.kavishdevar.librepods")) {
+                    Log.i(TAG, "Handling AirPods icon URI: $uri")
+
+                    try {
+                        val context = imageView.context
+
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            try {
+                                val packageName = uri.authority
+                                val packageContext = context.createPackageContext(
+                                    packageName,
+                                    Context.CONTEXT_IGNORE_SECURITY
+                                )
+
+                                val resPath = uri.pathSegments
+                                if (resPath.size >= 2 && resPath[0] == "drawable") {
+                                    val resourceName = resPath[1]
+                                    val resourceId = packageContext.resources.getIdentifier(
+                                        resourceName, "drawable", packageName
                                     )
 
-                                    val resPath = uri.pathSegments
-                                    if (resPath.size >= 2 && resPath[0] == "drawable") {
-                                        val resourceName = resPath[1]
-                                        val resourceId = packageContext.resources.getIdentifier(
-                                            resourceName, "drawable", packageName
+                                    if (resourceId != 0) {
+                                        val drawable = packageContext.resources.getDrawable(
+                                            resourceId, packageContext.theme
                                         )
 
-                                        if (resourceId != 0) {
-                                            val drawable = packageContext.resources.getDrawable(
-                                                resourceId, packageContext.theme
-                                            )
+                                        imageView.setImageDrawable(drawable)
+                                        imageView.alpha = 1.0f
 
-                                            imageView.setImageDrawable(drawable)
-                                            imageView.alpha = 1.0f
-
-                                            callback.result = null
-
-                                            Log.i(TAG, "Successfully loaded icon from resource: $resourceName")
-                                        } else {
-                                            Log.e(TAG, "Resource not found: $resourceName")
-                                        }
+                                        Log.i(TAG, "Successfully loaded icon from resource: $resourceName")
+                                    } else {
+                                        Log.e(TAG, "Resource not found: $resourceName")
                                     }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error loading resource from URI $uri: ${e.message}")
                                 }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error loading resource from URI $uri: ${e.message}")
                             }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error accessing context: ${e.message}")
                         }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error accessing context: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error in BluetoothIconHooker: ${e.message}")
-                    e.printStackTrace()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in BluetoothIconHooker: ${e.message}")
+                e.printStackTrace()
+            }
+            return result
+        }
+
+        private fun findContext(instance: Any?): Context {
+            var cls = instance?.javaClass
+            while (cls != null) {
+                try {
+                    val field = cls.getDeclaredField("mContext")
+                    field.isAccessible = true
+                    return field.get(instance) as Context
+                } catch (_: NoSuchFieldException) {
+                    cls = cls.superclass
                 }
             }
+            throw NoSuchFieldException("mContext")
         }
-    }
-
-    override fun getApplicationInfo(): ApplicationInfo {
-        return super.applicationInfo
     }
 
     companion object {
