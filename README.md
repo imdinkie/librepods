@@ -1,3 +1,15 @@
+<p align="center">
+  <img src="https://img.shields.io/github/stars/kavishdevar/librepods?style=for-the-badge&logoColor=white" />
+  <img src="https://img.shields.io/github/license/kavishdevar/librepods?style=for-the-badge" />
+  <img src="https://img.shields.io/github/v/release/kavishdevar/librepods?style=for-the-badge&logoColor=white&label=Release" />
+  <img src="https://img.shields.io/github/downloads/kavishdevar/librepods/total?style=for-the-badge&label=Downloads" />
+  <img src="https://img.shields.io/github/issues/kavishdevar/librepods?style=for-the-badge" />
+  
+  <a href="https://discord.gg/HhG4ycVum4">
+    <img src="https://img.shields.io/discord/1441416992027574375?style=for-the-badge&logoColor=white&color=5865F2&label=Discord" />
+  </a>
+</p>
+
 >[!IMPORTANT]
 Development paused due to lack of time until 17th May 2026 (JEE Advanced). PRs and issues might not be responded to until then.
 
@@ -64,7 +76,7 @@ https://github.com/user-attachments/assets/43911243-0576-4093-8c55-89c1db5ea533
 
 ### Root Requirement
 
-If you are using ColorOS/OxygenOS 16, Android 16 QPR3, Anroid 17 Beta 3 or higher, you don't need root except for customizing transparency mode, setting up hearing aid, and use Bluetooth Multipoint. Changing ANC, conversational awareness, ear detection, and other customizations will work without root.
+If you are using ColorOS/OxygenOS 16, Android 16 QPR3, Android 17 Beta 3 or higher, you don't need root except for customizing transparency mode, setting up hearing aid, and use Bluetooth Multipoint. Changing ANC, conversational awareness, ear detection, and other customizations will work without root.
 
 For everyone else:
 **You must have a rooted device with Xposed to use LibrePods on Android.** 
@@ -116,6 +128,27 @@ A huge thank you to everyone supporting the project!
 - CAPod - A companion app for AirPods on Android. ([play store](https://play.google.com/store/apps/details?id=eu.darken.capod) | [source code](https://github.com/d4rken-org/capod)). Use this if you're using Android version 16 QPR3 or below and are not rooted.
 - MagicPods for Steam Deck ([website](https://magicpods.app/steamdeck/))
 - MagicPods - if you're looking for "LibrePods for Windows"  ([ms store](https://apps.microsoft.com/store/detail/9P6SKKFKSHKM) [installer](https://magicpods.app/installer/MagicPods.appinstaller) | [website](https://magicpods.app/))
+
+# Nightly / Development Builds
+
+Want to try the latest features before they're officially released? You can grab nightly builds from GitHub Actions:
+
+### Android
+1. Go to the [Actions tab](https://github.com/kavishdevar/librepods/actions/workflows/ci-android.yml)
+2. Click on the most recent successful workflow run
+3. Scroll down to **Artifacts** and download the **Debug APK** zip file
+4. Extract the zip and install the `.apk` on your device
+
+> [!NOTE]
+> You need to be signed in to GitHub to download artifacts. Nightly builds are debug-signed and may not auto-update — you may need to uninstall the stable version first.
+
+### Linux (Rust)
+1. Go to the [Actions tab](https://github.com/kavishdevar/librepods/actions/workflows/ci-linux-rust.yml)
+2. Click on the most recent successful workflow run
+3. Download the **librepods-x86_64.AppImage** or **librepods** binary from **Artifacts**
+
+> [!WARNING]
+> Nightly builds are unstable and may contain bugs. Use at your own risk.
 
 # Star History
 
